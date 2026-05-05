@@ -18,6 +18,8 @@
 #include "PartPlate.hpp"
 #include "Gizmos/GLGizmoEmboss.hpp"
 #include "Gizmos/GLGizmoSVG.hpp"
+#include "MainFrame.hpp"
+#include "DrawModePanel.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include "slic3r/GUI/Tab.hpp"
@@ -1346,6 +1348,59 @@ void MenuFactory::append_menu_item_edit_svg(wxMenu *menu)
     append_menu_item(menu, wxID_ANY, name, description, open_svg, icon, nullptr, can_edit_svg, m_parent);
 }
 
+// TASK-025: "Edit Drawing" context menu entry for draw-path objects.
+// Shows only when the selected object was authored via Draw Mode.
+void MenuFactory::append_menu_item_edit_drawing(wxMenu* menu)
+{
+    wxString item_name = _L("Edit Drawing");
+
+    // Determine whether the currently selected object is a draw-path object.
+    auto can_edit_drawing = []() -> bool {
+        if (plater() == nullptr)
+            return false;
+        const Selection& sel = plater()->canvas3D()->get_selection();
+        int obj_idx = sel.get_object_idx();
+        if (obj_idx < 0)
+            return false;
+        const Model* model = sel.get_model();
+        if (!model || obj_idx >= (int)model->objects.size())
+            return false;
+        return model->objects[obj_idx]->is_draw_path_object();
+    };
+
+    // Remove any stale item from a previous call (menu is reused).
+    const int old_id = menu->FindItem(item_name);
+    if (old_id != wxNOT_FOUND)
+        menu->Destroy(old_id);
+
+    if (!can_edit_drawing())
+        return;  // nothing to add for normal 3D objects
+
+    wxString description = _L("Re-open Draw Mode panel to edit this drawn path");
+    auto open_draw_mode = [](const wxCommandEvent&) {
+        if (plater() == nullptr)
+            return;
+        const Selection& sel = plater()->canvas3D()->get_selection();
+        int obj_idx = sel.get_object_idx();
+        if (obj_idx < 0)
+            return;
+        Model* model = const_cast<Model*>(sel.get_model());
+        if (!model || obj_idx >= (int)model->objects.size())
+            return;
+        ModelObject* obj = model->objects[obj_idx];
+        if (!obj->is_draw_path_object())
+            return;
+        MainFrame* mf = wxGetApp().mainframe;
+        if (!mf || !mf->m_draw_mode_panel)
+            return;
+        mf->select_tab((size_t)MainFrame::tpDrawMode);
+        mf->m_draw_mode_panel->load_for_edit(obj, obj_idx);
+    };
+
+    append_menu_item(menu, wxID_ANY, item_name, description, open_draw_mode,
+                     "", nullptr, can_edit_drawing, m_parent);
+}
+
 void MenuFactory::append_menu_item_invalidate_cut_info(wxMenu *menu)
 {
     const wxString menu_name = _L("Invalidate cut info");
@@ -1829,6 +1884,7 @@ wxMenu* MenuFactory::object_menu()
     append_menu_item_invalidate_cut_info(&m_object_menu);
     append_menu_item_edit_text(&m_object_menu);
     append_menu_item_edit_svg(&m_object_menu);
+    append_menu_item_edit_drawing(&m_object_menu);   // TASK-025
     append_menu_item_change_filament(&m_object_menu);
     return &m_object_menu;
 }
