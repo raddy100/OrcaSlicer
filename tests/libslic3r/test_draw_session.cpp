@@ -1,6 +1,14 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/DrawSession.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Config.hpp"
+#include "libslic3r/Semver.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
+
+#include <boost/filesystem/operations.hpp>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -146,4 +154,128 @@ TEST_CASE("DrawSession: copy constructor produces independent clone", "[DrawSess
 
     REQUIRE(original.layer_count() == 1);
     REQUIRE_THAT(original.layers[0].segments[0].end.x(), WithinAbs(10.0, 1e-9));
+}
+
+// TASK-011: 3mf round-trip — store_bbs_3mf/load_bbs_3mf must preserve the
+// DrawSession attached to a draw-path ModelObject without data loss.
+TEST_CASE("Draw3mf: round-trip preserves draw session", "[Draw3mf]")
+{
+    // ── 1. Build a minimal model with one draw-path object ──────────────────
+    Model src_model;
+
+    // make_cube produces a valid, non-degenerate closed mesh — adequate for
+    // the 3mf geometry writer which just needs valid triangle data.
+    ModelObject* obj = src_model.add_object(
+        "TestDrawPath", "", make_cube(10.0, 10.0, 10.0));
+
+    // An instance is required for the BBS 3mf exporter to record placement.
+    obj->add_instance();
+
+    // Mark the object as a draw-path object.
+    obj->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+
+    // Build a draw session: 2 layers, 4 segments total (mix of extrusion + travel).
+    auto src_session = std::make_unique<DrawSession>();
+    src_session->add_layer(0.2);   // layer 0: z 0.0 → 0.2
+    {
+        DrawSegment s;
+        s.start = Vec2d(0.0, 0.0); s.end = Vec2d(10.0, 0.0); s.is_travel = false;
+        src_session->layers[0].segments.push_back(s);
+    }
+    {
+        DrawSegment s;
+        s.start = Vec2d(10.0, 0.0); s.end = Vec2d(10.0, 5.0); s.is_travel = true;
+        src_session->layers[0].segments.push_back(s);
+    }
+    src_session->add_layer(0.2);   // layer 1: z 0.2 → 0.4
+    {
+        DrawSegment s;
+        s.start = Vec2d(0.0, 0.0); s.end = Vec2d(5.0, 5.0); s.is_travel = false;
+        src_session->layers[1].segments.push_back(s);
+    }
+    {
+        DrawSegment s;
+        s.start = Vec2d(5.0, 5.0); s.end = Vec2d(10.0, 0.0); s.is_travel = false;
+        src_session->layers[1].segments.push_back(s);
+    }
+    obj->draw_session = std::move(src_session);
+
+    // ── 2. Export to a temp file ─────────────────────────────────────────────
+    namespace fs = boost::filesystem;
+    const fs::path tmp =
+        fs::temp_directory_path() / "orca_test_draw_roundtrip.3mf";
+    fs::remove(tmp); // clean up any stale file from a previous crashed run
+
+    DynamicPrintConfig store_cfg; // empty config is sufficient for geometry only
+    StoreParams sp;
+    sp.path   = tmp.string().c_str();
+    sp.model  = &src_model;
+    sp.config = &store_cfg;
+    // plate_data_list defaults to empty: draw sessions are per-object metadata
+    // and are written unconditionally by _add_draw_sessions_to_archive.
+
+    const bool stored = store_bbs_3mf(sp);
+    REQUIRE(stored);
+    REQUIRE(fs::exists(tmp));
+
+    // ── 3. Re-import ─────────────────────────────────────────────────────────
+    Model dst_model;
+    DynamicPrintConfig dst_cfg;
+    ConfigSubstitutionContext ctx{ ForwardCompatibilitySubstitutionRule::Disable };
+    PlateDataPtrs plate_data;
+    bool is_bbl = false, is_orca = false;
+    Semver ver;
+
+    const bool loaded = load_bbs_3mf(
+        tmp.string().c_str(),
+        &dst_cfg, &ctx, &dst_model,
+        &plate_data,
+        /*project_presets=*/nullptr,
+        &is_bbl, &is_orca, &ver,
+        /*proFn=*/nullptr,
+        LoadStrategy::LoadModel);
+
+    fs::remove(tmp);
+    release_PlateData_list(plate_data);
+
+    REQUIRE(loaded);
+    REQUIRE(dst_model.objects.size() == 1);
+
+    // ── 4. Verify draw session integrity ─────────────────────────────────────
+    const ModelObject* dst_obj = dst_model.objects[0];
+
+    REQUIRE(dst_obj->draw_session != nullptr);
+    REQUIRE(dst_obj->is_draw_path_object());
+
+    const DrawSession& dst_s = *dst_obj->draw_session;
+    REQUIRE(dst_s.layer_count() == 2);
+
+    // Layer 0: 2 segments (1 extrusion + 1 travel)
+    REQUIRE(dst_s.layers[0].segments.size() == 2);
+    REQUIRE(dst_s.layers[0].layer_index == 0);
+    REQUIRE_THAT(dst_s.layers[0].z_start, WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(dst_s.layers[0].z_end,   WithinAbs(0.2, 1e-6));
+
+    const DrawSegment& s00 = dst_s.layers[0].segments[0];
+    REQUIRE_FALSE(s00.is_travel);
+    REQUIRE_THAT(s00.start.x(), WithinAbs( 0.0, 1e-6));
+    REQUIRE_THAT(s00.start.y(), WithinAbs( 0.0, 1e-6));
+    REQUIRE_THAT(s00.end.x(),   WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(s00.end.y(),   WithinAbs( 0.0, 1e-6));
+
+    const DrawSegment& s01 = dst_s.layers[0].segments[1];
+    REQUIRE(s01.is_travel);
+
+    // Layer 1: 2 extrusion segments
+    REQUIRE(dst_s.layers[1].segments.size() == 2);
+    REQUIRE(dst_s.layers[1].layer_index == 1);
+    REQUIRE_THAT(dst_s.layers[1].z_start, WithinAbs(0.2, 1e-6));
+    REQUIRE_THAT(dst_s.layers[1].z_end,   WithinAbs(0.4, 1e-6));
+
+    const DrawSegment& s10 = dst_s.layers[1].segments[0];
+    REQUIRE_FALSE(s10.is_travel);
+    REQUIRE_THAT(s10.start.x(), WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(s10.start.y(), WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(s10.end.x(),   WithinAbs(5.0, 1e-6));
+    REQUIRE_THAT(s10.end.y(),   WithinAbs(5.0, 1e-6));
 }
