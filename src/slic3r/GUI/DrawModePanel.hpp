@@ -56,6 +56,7 @@ private:
     wxToggleButton*    m_draw_toggle    { nullptr };
     wxToggleButton*    m_edit_toggle    { nullptr };
     wxToggleButton*    m_fill_toggle    { nullptr }; // filled-quad width preview
+    wxToggleButton*    m_snap_toggle    { nullptr }; // snap-to-grid (on by default)
     wxButton*          m_prev_layer_btn { nullptr };
     wxButton*          m_next_layer_btn { nullptr };
     wxButton*          m_add_layer_btn  { nullptr };
@@ -83,6 +84,8 @@ private:
     double               m_nozzle_d    { 0.4 };
     // Filled-quad width preview toggle
     bool                 m_show_filled { false };
+    // Snap-to-grid (grid resolution = nozzle_diameter, on by default)
+    bool                 m_snap_to_grid { true };
 
     // Edit mode selection / drag state
     int                  m_sel_layer_idx { -1 };
@@ -103,6 +106,8 @@ private:
     // Coordinate conversion between canvas pixels and plate-space mm
     Vec2d   screen_to_plate(wxPoint pt) const;
     wxPoint plate_to_screen(Vec2d   pt) const;
+    // Round pt to the nearest nozzle-diameter grid point (no-op when snap off).
+    Vec2d   snap_pos(Vec2d pt) const;
 
     // Canvas event handlers
     void on_canvas_paint(wxPaintEvent&);
@@ -116,6 +121,7 @@ private:
     void on_draw_toggle(wxCommandEvent& evt);
     void on_edit_toggle(wxCommandEvent& evt);
     void on_fill_toggle(wxCommandEvent& evt);
+    void on_snap_toggle(wxCommandEvent& evt);
     void on_prev_layer(wxCommandEvent& evt);
     void on_next_layer(wxCommandEvent& evt);
     void on_add_layer(wxCommandEvent& evt);

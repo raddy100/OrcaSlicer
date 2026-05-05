@@ -17,6 +17,7 @@
 #include <wx/dcbuffer.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace Slic3r {
 namespace GUI {
@@ -40,7 +41,9 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_draw_toggle = new wxToggleButton(this, wxID_ANY, "Draw");
     m_edit_toggle = new wxToggleButton(this, wxID_ANY, "Edit");
     m_fill_toggle = new wxToggleButton(this, wxID_ANY, "Fill Width");
+    m_snap_toggle = new wxToggleButton(this, wxID_ANY, "Snap");
     m_draw_toggle->SetValue(true);
+    m_snap_toggle->SetValue(true); // snap on by default
 
     // Action buttons
     m_clear_btn    = new wxButton(this, wxID_ANY, "Clear Layer");
@@ -60,6 +63,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     top_sizer->Add(m_draw_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_edit_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_fill_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_snap_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->AddStretchSpacer();
     top_sizer->Add(m_clear_btn,    0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_simulate_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
@@ -82,6 +86,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_draw_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_draw_toggle, this);
     m_edit_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_edit_toggle, this);
     m_fill_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_fill_toggle, this);
+    m_snap_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_snap_toggle, this);
     m_prev_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_prev_layer, this);
     m_next_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_next_layer, this);
     m_add_layer_btn->Bind(wxEVT_BUTTON,  &DrawModePanel::on_add_layer,  this);
@@ -227,6 +232,14 @@ wxPoint DrawModePanel::plate_to_screen(Vec2d pt) const
     int sx = CANVAS_PAD + static_cast<int>(pt.x() / m_plate_w_mm * inner_w);
     int sy = CANVAS_PAD + static_cast<int>((1.0 - pt.y() / m_plate_h_mm) * inner_h);
     return wxPoint(sx, sy);
+}
+
+Vec2d DrawModePanel::snap_pos(Vec2d pt) const
+{
+    if (!m_snap_to_grid || m_nozzle_d < 1e-6) return pt;
+    const double g = m_nozzle_d;
+    return Vec2d(std::round(pt.x() / g) * g,
+                 std::round(pt.y() / g) * g);
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +394,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
 
 void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
 {
-    Vec2d pos = screen_to_plate(evt.GetPosition());
+    Vec2d pos = snap_pos(screen_to_plate(evt.GetPosition()));
 
     if (m_input_mode == DrawInputMode::Editing) {
         int active = m_session.active_layer;
@@ -474,7 +487,7 @@ void DrawModePanel::on_canvas_left_up(wxMouseEvent& evt)
             && ep.segment_index < (int)m_session.layers[ep.layer_index].segments.size()) {
         const DrawSegment& seg = m_session.layers[ep.layer_index].segments[ep.segment_index];
         Vec2d old_pos = ep.is_start ? seg.start : seg.end;
-        Vec2d new_pos = m_drag_preview;
+        Vec2d new_pos = snap_pos(m_drag_preview);
         // Only commit if actually moved
         if ((new_pos - old_pos).squaredNorm() > 1e-12) {
             dispatch_command(std::make_unique<MoveEndpointCommand>(
@@ -488,7 +501,7 @@ void DrawModePanel::on_canvas_left_up(wxMouseEvent& evt)
 
 void DrawModePanel::on_canvas_motion(wxMouseEvent& evt)
 {
-    m_mouse_plate = screen_to_plate(evt.GetPosition());
+    m_mouse_plate = snap_pos(screen_to_plate(evt.GetPosition()));
     if (m_is_dragging)
         m_drag_preview = m_mouse_plate;
     if (m_canvas) m_canvas->Refresh(false);
@@ -773,6 +786,14 @@ void DrawModePanel::on_char_hook(wxKeyEvent& evt)
 void DrawModePanel::on_fill_toggle(wxCommandEvent&)
 {
     m_show_filled = m_fill_toggle->GetValue();
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_snap_toggle(wxCommandEvent&)
+{
+    m_snap_to_grid = m_snap_toggle->GetValue();
+    // Immediately snap the current mouse position so crosshair updates
+    m_mouse_plate = snap_pos(m_mouse_plate);
     if (m_canvas) m_canvas->Refresh(false);
 }
 
