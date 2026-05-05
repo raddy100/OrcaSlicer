@@ -46,9 +46,13 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_snap_toggle->SetValue(true); // snap on by default
 
     // Action buttons
+    m_snip_btn     = new wxButton(this, wxID_ANY, "✂ Snip");
     m_clear_btn    = new wxButton(this, wxID_ANY, "Clear Layer");
     m_simulate_btn = new wxButton(this, wxID_ANY, "Simulate");
     m_finalize_btn = new wxButton(this, wxID_ANY, "Finalize");
+    m_snip_btn->SetToolTip("Break the continuous drawing chain here.\n"
+                           "Next click starts a new disconnected path (printer travels).\n"
+                           "Shortcut: Right-click or Escape.");
 
     // Interactive 2-D drawing canvas
     m_canvas = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
@@ -64,6 +68,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     top_sizer->Add(m_edit_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_fill_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_snap_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_snip_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->AddStretchSpacer();
     top_sizer->Add(m_clear_btn,    0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_simulate_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
@@ -87,6 +92,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_edit_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_edit_toggle, this);
     m_fill_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_fill_toggle, this);
     m_snap_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_snap_toggle, this);
+    m_snip_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_snip, this);
     m_prev_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_prev_layer, this);
     m_next_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_next_layer, this);
     m_add_layer_btn->Bind(wxEVT_BUTTON,  &DrawModePanel::on_add_layer,  this);
@@ -344,11 +350,29 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
     if (m_input_mode == DrawInputMode::Drawing && m_pending_start) {
         wxPoint ps = plate_to_screen(*m_pending_start);
         wxPoint pm_draw = plate_to_screen(m_mouse_plate);
+        // Rubber-band preview line
         dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
         dc.DrawLine(ps, pm_draw);
+        // Filled anchor dot — shows the active chain start point
         dc.SetPen(wxPen(wxColour(255, 200, 50), 2));
-        dc.SetBrush(*wxTRANSPARENT_BRUSH);
+        dc.SetBrush(wxBrush(wxColour(255, 200, 50)));
         dc.DrawCircle(ps, 5);
+        dc.SetBrush(*wxTRANSPARENT_BRUSH);
+    }
+
+    // Status hint text at the bottom of the canvas
+    {
+        wxString hint;
+        if (m_input_mode == DrawInputMode::Drawing) {
+            hint = m_pending_start
+                ? wxString("Continuous drawing \u2022 Left-click to extend \u2022 Right-click / Snip to break")
+                : wxString("Click to start drawing");
+        } else {
+            hint = "Click segment to select \u2022 Drag endpoints \u2022 Del to remove";
+        }
+        dc.SetFont(wxFont(8, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL));
+        dc.SetTextForeground(wxColour(160, 160, 160));
+        dc.DrawText(hint, CANVAS_PAD + 4, sz.y - CANVAS_PAD - 18);
     }
 
     // Edit mode: endpoint handles (hollow circles on active layer)
@@ -751,12 +775,20 @@ void DrawModePanel::on_char_hook(wxKeyEvent& evt)
         return;
     }
 
+    // Escape in Drawing mode: snip the continuous chain
+    if (evt.GetKeyCode() == WXK_ESCAPE && m_input_mode == DrawInputMode::Drawing) {
+        m_pending_start.reset();
+        if (m_canvas) m_canvas->Refresh(false);
+        return;
+    }
+
     if (evt.ControlDown()) {
         if (evt.GetKeyCode() == 'Z' && !m_undo_stack.empty()) {
             auto cmd = std::move(m_undo_stack.back());
             m_undo_stack.pop_back();
             cmd->undo(m_session);
             m_redo_stack.push_back(std::move(cmd));
+            sync_chain_anchor();
             refresh();
             return; // swallowed
         }
@@ -765,6 +797,7 @@ void DrawModePanel::on_char_hook(wxKeyEvent& evt)
             m_redo_stack.pop_back();
             cmd->execute(m_session);
             m_undo_stack.push_back(std::move(cmd));
+            sync_chain_anchor();
             refresh();
             return; // swallowed
         }
@@ -795,6 +828,27 @@ void DrawModePanel::on_snap_toggle(wxCommandEvent&)
     // Immediately snap the current mouse position so crosshair updates
     m_mouse_plate = snap_pos(m_mouse_plate);
     if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_snip(wxCommandEvent&)
+{
+    // Break the continuous chain. Next left-click starts a new extrusion path.
+    // The G-code generator will insert a retract + travel between the two paths.
+    m_pending_start.reset();
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::sync_chain_anchor()
+{
+    if (m_input_mode != DrawInputMode::Drawing) return;
+    const int active = m_session.active_layer;
+    if (active < 0 || active >= m_session.layer_count()
+            || m_session.layers[active].segments.empty()) {
+        m_pending_start.reset();
+        return;
+    }
+    // Continue chain from the last segment endpoint on the active layer.
+    m_pending_start = m_session.layers[active].segments.back().end;
 }
 
 } // namespace GUI

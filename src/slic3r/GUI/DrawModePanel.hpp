@@ -57,6 +57,7 @@ private:
     wxToggleButton*    m_edit_toggle    { nullptr };
     wxToggleButton*    m_fill_toggle    { nullptr }; // filled-quad width preview
     wxToggleButton*    m_snap_toggle    { nullptr }; // snap-to-grid (on by default)
+    wxButton*          m_snip_btn       { nullptr }; // break continuous chain
     wxButton*          m_prev_layer_btn { nullptr };
     wxButton*          m_next_layer_btn { nullptr };
     wxButton*          m_add_layer_btn  { nullptr };
@@ -122,6 +123,10 @@ private:
     void on_edit_toggle(wxCommandEvent& evt);
     void on_fill_toggle(wxCommandEvent& evt);
     void on_snap_toggle(wxCommandEvent& evt);
+    void on_snip(wxCommandEvent& evt);
+    // Sync the chain anchor (m_pending_start) to the last segment endpoint
+    // after undo/redo, so the rubber-band previews the correct continuation.
+    void sync_chain_anchor();
     void on_prev_layer(wxCommandEvent& evt);
     void on_next_layer(wxCommandEvent& evt);
     void on_add_layer(wxCommandEvent& evt);
