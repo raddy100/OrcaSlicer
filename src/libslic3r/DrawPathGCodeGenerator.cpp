@@ -21,6 +21,10 @@ DrawPathGCodeGenerator::DrawPathGCodeGenerator(const DynamicPrintConfig& full_co
 
     // Register extruder 0 after config is set (Extruder ctor reads GCodeConfig).
     m_writer.set_extruders({0});
+    // Select extruder 0 as the active tool so filament() returns non-null.
+    // set_extruders() adds extruders but leaves m_curr_extruder_id = -1.
+    // toolchange() sets m_curr_extruder_id and m_curr_filament_extruder[0].
+    m_writer.toolchange(0);
 }
 
 // ---------------------------------------------------------------------------

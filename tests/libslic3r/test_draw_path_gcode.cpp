@@ -88,15 +88,20 @@ TEST_CASE("DrawPathGCodeGenerator: extrusion math matches PRD formula", "[DrawPa
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
     std::string gcode = gen.generate(session);
 
-    // Extract E value from "G1 X... Y... E..."
+    // Extract positive E values from "G1 ... E..." lines (skip retraction/negative E).
+    // OrcaSlicer's postamble emits a retraction (negative E); we want only extrusion.
     double actual_E = 0.0;
-    auto pos = gcode.find("G1 ");
-    while (pos != std::string::npos) {
+    std::size_t pos = 0;
+    while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
+        std::size_t line_end = gcode.find('\n', pos);
         auto e_pos = gcode.find(" E", pos);
-        if (e_pos != std::string::npos && e_pos < gcode.find('\n', pos)) {
-            actual_E += std::stod(gcode.substr(e_pos + 2, gcode.find_first_of(" \n\r", e_pos + 2) - e_pos - 2));
+        if (e_pos != std::string::npos && e_pos < line_end) {
+            std::size_t val_start = e_pos + 2;
+            double val = std::stod(gcode.substr(val_start, gcode.find_first_of(" \n\r", val_start) - val_start));
+            if (val > 0.0)  // skip retraction (negative E)
+                actual_E += val;
         }
-        pos = gcode.find("G1 ", pos + 1);
+        pos = (line_end != std::string::npos) ? line_end + 1 : std::string::npos;
     }
 
     REQUIRE_THAT(actual_E, Catch::Matchers::WithinRel(expected_E, 0.01));
@@ -107,14 +112,25 @@ TEST_CASE("DrawPathGCodeGenerator: extrusion math matches PRD formula", "[DrawPa
 // ---------------------------------------------------------------------------
 TEST_CASE("DrawPathGCodeGenerator: empty session produces preamble and postamble only", "[DrawPathGCodeGenerator]")
 {
+    // Use zero retraction so that the postamble retract doesn't emit any E moves.
+    // An empty session should produce no material extrusion whatsoever.
     DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
     DrawSession session; // empty
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
     std::string gcode = gen.generate(session);
 
-    // Must contain preamble content (G90) and postamble but no extrusion moves.
+    // Must contain preamble content (G90) and postamble but no G1 extrusion/retraction moves.
+    // Note: G92 E0 in the preamble is a position reset command (not extrusion) — we only check G1 lines.
     REQUIRE(gcode.find("G90") != std::string::npos);
-    REQUIRE(gcode.find(" E") == std::string::npos);
+    bool has_g1_e = false;
+    std::size_t pos = 0;
+    while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
+        std::size_t line_end = gcode.find('\n', pos);
+        if (gcode.find(" E", pos) < line_end) { has_g1_e = true; break; }
+        pos = (line_end != std::string::npos) ? line_end + 1 : std::string::npos;
+    }
+    REQUIRE(!has_g1_e);
 }
 
 TEST_CASE("DrawPathGCodeGenerator: single extrusion segment produces exactly one G1 E line", "[DrawPathGCodeGenerator]")
@@ -129,14 +145,19 @@ TEST_CASE("DrawPathGCodeGenerator: single extrusion segment produces exactly one
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
     std::string gcode = gen.generate(session);
 
-    // Count G1 lines that contain " E"
+    // Count G1 lines that contain positive " E" values (extrusion only; skip retraction which is negative E).
+    // OrcaSlicer's postamble emits a retraction G1 E- line — that must not be counted.
     int count = 0;
     std::size_t pos = 0;
     while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
         std::size_t line_end = gcode.find('\n', pos);
-        if (gcode.find(" E", pos) < line_end)
-            ++count;
-        pos = line_end;
+        auto e_pos = gcode.find(" E", pos);
+        if (e_pos != std::string::npos && e_pos < line_end) {
+            std::size_t val_start = e_pos + 2;
+            double val = std::stod(gcode.substr(val_start, gcode.find_first_of(" \n\r", val_start) - val_start));
+            if (val > 0.0) ++count;
+        }
+        pos = (line_end != std::string::npos) ? line_end + 1 : std::string::npos;
     }
     REQUIRE(count == 1);
 }
@@ -187,17 +208,25 @@ TEST_CASE("DrawPathGCodeGenerator: travel segment produces G0 without extruding 
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
     std::string gcode = gen.generate(session);
 
-    // Must have at least one G0 (travel) line.
-    REQUIRE(gcode.find("G0 ") != std::string::npos);
-    // With zero retraction, no G1 ... E lines should appear (no extrusion at all).
+    // OrcaSlicer's GCodeWriter emits G1 (with a travel feedrate) for all motion,
+    // including travel moves — it does not emit G0. Verify there is at least one
+    // G1 line without an E parameter (the travel segment), and with zero retraction
+    // there must be no G1 E lines at all.
+    bool has_g1_without_e = false;
     bool has_g1_e = false;
     std::size_t pos = 0;
     while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
         std::size_t line_end = gcode.find('\n', pos);
-        if (gcode.find(" E", pos) < line_end) { has_g1_e = true; break; }
-        pos = line_end;
+        if (line_end == std::string::npos) line_end = gcode.size();
+        bool has_e = (gcode.find(" E", pos) < line_end);
+        if (has_e)
+            has_g1_e = true;
+        else
+            has_g1_without_e = true;
+        pos = line_end + 1;
     }
-    REQUIRE(!has_g1_e);
+    REQUIRE(has_g1_without_e);    // travel emits G1 without E
+    REQUIRE(!has_g1_e);           // with zero retraction, no E moves at all
 }
 
 TEST_CASE("DrawPathGCodeGenerator: plate_origin shifts all XY coordinates", "[DrawPathGCodeGenerator]")
