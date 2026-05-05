@@ -55,6 +55,7 @@ private:
     wxPanel*           m_canvas         { nullptr }; // 2-D drawing surface
     wxToggleButton*    m_draw_toggle    { nullptr };
     wxToggleButton*    m_edit_toggle    { nullptr };
+    wxToggleButton*    m_fill_toggle    { nullptr }; // filled-quad width preview
     wxButton*          m_prev_layer_btn { nullptr };
     wxButton*          m_next_layer_btn { nullptr };
     wxButton*          m_add_layer_btn  { nullptr };
@@ -78,6 +79,18 @@ private:
     double               m_plate_w_mm  { 256.0 };
     double               m_plate_h_mm  { 256.0 };
 
+    // Cached nozzle diameter (read from printer preset in activate())
+    double               m_nozzle_d    { 0.4 };
+    // Filled-quad width preview toggle
+    bool                 m_show_filled { false };
+
+    // Edit mode selection / drag state
+    int                  m_sel_layer_idx { -1 };
+    int                  m_sel_seg_idx   { -1 };
+    std::optional<EndpointRef>  m_dragging_ep;
+    Vec2d                m_drag_preview  { 0.0, 0.0 };
+    bool                 m_is_dragging   { false };
+
     // Command stacks for undo/redo
     std::vector<std::unique_ptr<DrawCommand>> m_undo_stack;
     std::vector<std::unique_ptr<DrawCommand>> m_redo_stack;
@@ -97,10 +110,12 @@ private:
     void on_canvas_left_down(wxMouseEvent&);
     void on_canvas_right_down(wxMouseEvent&);
     void on_canvas_motion(wxMouseEvent&);
+    void on_canvas_left_up(wxMouseEvent&);
 
     // Button handlers
     void on_draw_toggle(wxCommandEvent& evt);
     void on_edit_toggle(wxCommandEvent& evt);
+    void on_fill_toggle(wxCommandEvent& evt);
     void on_prev_layer(wxCommandEvent& evt);
     void on_next_layer(wxCommandEvent& evt);
     void on_add_layer(wxCommandEvent& evt);

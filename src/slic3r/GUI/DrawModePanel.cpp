@@ -39,6 +39,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     // Mode toggles
     m_draw_toggle = new wxToggleButton(this, wxID_ANY, "Draw");
     m_edit_toggle = new wxToggleButton(this, wxID_ANY, "Edit");
+    m_fill_toggle = new wxToggleButton(this, wxID_ANY, "Fill Width");
     m_draw_toggle->SetValue(true);
 
     // Action buttons
@@ -58,6 +59,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     top_sizer->Add(m_banner_text, 1, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_draw_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_edit_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_fill_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->AddStretchSpacer();
     top_sizer->Add(m_clear_btn,    0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_simulate_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
@@ -79,6 +81,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     // Bind events
     m_draw_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_draw_toggle, this);
     m_edit_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_edit_toggle, this);
+    m_fill_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_fill_toggle, this);
     m_prev_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_prev_layer, this);
     m_next_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_next_layer, this);
     m_add_layer_btn->Bind(wxEVT_BUTTON,  &DrawModePanel::on_add_layer,  this);
@@ -91,8 +94,15 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_canvas->Bind(wxEVT_PAINT,       &DrawModePanel::on_canvas_paint,      this);
     m_canvas->Bind(wxEVT_ERASE_BACKGROUND, &DrawModePanel::on_canvas_erase_bg, this);
     m_canvas->Bind(wxEVT_LEFT_DOWN,   &DrawModePanel::on_canvas_left_down,  this);
+    m_canvas->Bind(wxEVT_LEFT_UP,     &DrawModePanel::on_canvas_left_up,   this);
     m_canvas->Bind(wxEVT_RIGHT_DOWN,  &DrawModePanel::on_canvas_right_down, this);
     m_canvas->Bind(wxEVT_MOTION,      &DrawModePanel::on_canvas_motion,     this);
+    m_canvas->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent&) {
+        // Capture lost externally — clean up drag state without calling ReleaseMouse
+        m_is_dragging = false;
+        m_dragging_ep.reset();
+        if (m_canvas) m_canvas->Refresh(false);
+    });
 }
 
 DrawModePanel::~DrawModePanel() = default;
@@ -113,6 +123,20 @@ void DrawModePanel::activate(PartPlate* plate)
         m_plate_x = 0.0;
         m_plate_y = 0.0;
     }
+
+    // Cache nozzle diameter from active printer preset
+    m_nozzle_d = 0.4;
+    if (wxGetApp().preset_bundle) {
+        const auto& pcfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        if (auto* nd = pcfg.option<ConfigOptionFloats>("nozzle_diameter"))
+            if (!nd->values.empty()) m_nozzle_d = nd->values.front();
+    }
+
+    // Reset edit state
+    m_sel_layer_idx = -1;
+    m_sel_seg_idx   = -1;
+    m_dragging_ep.reset();
+    m_is_dragging   = false;
 
     update_banner();
     update_layer_label();
@@ -248,38 +272,100 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         return;
     }
 
-    // Segments (inactive layers dim, active layer bright)
+    // Segments: travel=blue dashed, extrusion=orange; active bright, inactive dim
     int active = m_session.active_layer;
     for (int li = 0; li < m_session.layer_count(); ++li) {
-        bool is_active = (li == active);
-        wxColour col = is_active ? wxColour(80, 220, 100) : wxColour(50, 90, 55);
-        int width = is_active ? 2 : 1;
-        dc.SetPen(wxPen(col, width));
-        dc.SetBrush(wxBrush(col));
-        for (const DrawSegment& seg : m_session.layers[li].segments) {
+        const bool is_active = (li == active);
+        for (int si = 0; si < (int)m_session.layers[li].segments.size(); ++si) {
+            const DrawSegment& seg = m_session.layers[li].segments[si];
             wxPoint p1 = plate_to_screen(seg.start);
             wxPoint p2 = plate_to_screen(seg.end);
-            dc.DrawLine(p1, p2);
-            if (is_active) {
-                dc.DrawCircle(p1, 3);
-                dc.DrawCircle(p2, 3);
+            bool is_sel = (m_sel_layer_idx == li && m_sel_seg_idx == si);
+
+            if (is_sel) {
+                // Selected segment — bright yellow
+                dc.SetPen(wxPen(wxColour(255, 255, 0), 3));
+                dc.SetBrush(wxBrush(wxColour(255, 255, 0)));
+                dc.DrawLine(p1, p2);
+                dc.DrawCircle(p1, 4);
+                dc.DrawCircle(p2, 4);
+            } else if (seg.is_travel) {
+                // Travel move — blue dashed
+                wxColour c = is_active ? wxColour(80, 140, 255) : wxColour(30, 55, 100);
+                dc.SetPen(wxPen(c, 1, wxPENSTYLE_SHORT_DASH));
+                dc.DrawLine(p1, p2);
+            } else if (m_show_filled && is_active) {
+                // Filled nozzle-width quad for extrusion on active layer
+                Vec2d dv = seg.end - seg.start;
+                double dlen = dv.norm();
+                if (dlen > 1e-6) {
+                    Vec2d dir = dv / dlen;
+                    Vec2d perp(-dir.y(), dir.x());
+                    double hw = m_nozzle_d * 0.5;
+                    wxPoint pts[4] = {
+                        plate_to_screen(seg.start - perp * hw),
+                        plate_to_screen(seg.start + perp * hw),
+                        plate_to_screen(seg.end   + perp * hw),
+                        plate_to_screen(seg.end   - perp * hw),
+                    };
+                    dc.SetPen(wxPen(wxColour(255, 100, 0), 1));
+                    dc.SetBrush(wxBrush(wxColour(200, 75, 0)));
+                    dc.DrawPolygon(4, pts);
+                }
+            } else {
+                // Wire extrusion line
+                wxColour c = is_active ? wxColour(255, 140, 0) : wxColour(80, 50, 15);
+                int lw = is_active ? 2 : 1;
+                dc.SetPen(wxPen(c, lw));
+                dc.SetBrush(wxBrush(c));
+                dc.DrawLine(p1, p2);
+                if (is_active) {
+                    dc.DrawCircle(p1, 3);
+                    dc.DrawCircle(p2, 3);
+                }
             }
         }
     }
 
-    // Pending start point + preview line
-    if (m_pending_start) {
+    // Drawing mode: pending start + preview line
+    if (m_input_mode == DrawInputMode::Drawing && m_pending_start) {
         wxPoint ps = plate_to_screen(*m_pending_start);
-        wxPoint pm = plate_to_screen(m_mouse_plate);
-
-        // Preview line (dashed yellow)
+        wxPoint pm_draw = plate_to_screen(m_mouse_plate);
         dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
-        dc.DrawLine(ps, pm);
-
-        // Hollow circle at pending start
+        dc.DrawLine(ps, pm_draw);
         dc.SetPen(wxPen(wxColour(255, 200, 50), 2));
         dc.SetBrush(*wxTRANSPARENT_BRUSH);
         dc.DrawCircle(ps, 5);
+    }
+
+    // Edit mode: endpoint handles (hollow circles on active layer)
+    if (m_input_mode == DrawInputMode::Editing
+            && active >= 0 && active < m_session.layer_count()) {
+        dc.SetPen(wxPen(wxColour(255, 200, 50), 2));
+        dc.SetBrush(*wxTRANSPARENT_BRUSH);
+        for (const DrawSegment& seg : m_session.layers[active].segments) {
+            dc.DrawCircle(plate_to_screen(seg.start), 5);
+            dc.DrawCircle(plate_to_screen(seg.end),   5);
+        }
+    }
+
+    // Edit mode: drag-in-progress preview
+    if (m_is_dragging && m_dragging_ep.has_value()
+            && m_dragging_ep->layer_index >= 0
+            && m_dragging_ep->layer_index < m_session.layer_count()
+            && m_dragging_ep->segment_index >= 0
+            && m_dragging_ep->segment_index <
+               (int)m_session.layers[m_dragging_ep->layer_index].segments.size()) {
+        const DrawSegment& dseg =
+            m_session.layers[m_dragging_ep->layer_index].segments[m_dragging_ep->segment_index];
+        Vec2d fixed   = m_dragging_ep->is_start ? dseg.end : dseg.start;
+        wxPoint pf    = plate_to_screen(fixed);
+        wxPoint pd_ep = plate_to_screen(m_drag_preview);
+        dc.SetPen(wxPen(wxColour(255, 255, 0), 2, wxPENSTYLE_SHORT_DASH));
+        dc.DrawLine(pd_ep, pf);
+        dc.SetPen(wxPen(wxColour(255, 255, 0), 2));
+        dc.SetBrush(*wxTRANSPARENT_BRUSH);
+        dc.DrawCircle(pd_ep, 5);
     }
 
     // Crosshair at mouse
@@ -295,8 +381,56 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
 
 void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
 {
-    if (m_input_mode != DrawInputMode::Drawing) { evt.Skip(); return; }
+    Vec2d pos = screen_to_plate(evt.GetPosition());
 
+    if (m_input_mode == DrawInputMode::Editing) {
+        int active = m_session.active_layer;
+        if (active < 0 || active >= m_session.layer_count()) return;
+        const DrawLayer& layer = m_session.layers[active];
+
+        // Threshold: ~8 screen pixels converted to plate-space mm
+        wxSize sz = m_canvas->GetClientSize();
+        double inner_w = std::max(1.0, (double)(sz.x - 2 * CANVAS_PAD));
+        double thr = 8.0 / (inner_w / m_plate_w_mm);
+
+        // Priority 1: endpoints
+        int ep_seg = -1; bool ep_is_start = false; double best_ep = thr;
+        for (int si = 0; si < (int)layer.segments.size(); ++si) {
+            double ds = (pos - layer.segments[si].start).norm();
+            double de = (pos - layer.segments[si].end).norm();
+            if (ds < best_ep) { best_ep = ds; ep_seg = si; ep_is_start = true; }
+            if (de < best_ep) { best_ep = de; ep_seg = si; ep_is_start = false; }
+        }
+        if (ep_seg >= 0) {
+            Vec2d ep = ep_is_start ? layer.segments[ep_seg].start
+                                   : layer.segments[ep_seg].end;
+            m_dragging_ep   = EndpointRef{active, ep_seg, ep_is_start};
+            m_drag_preview  = ep;
+            m_is_dragging   = true;
+            m_sel_layer_idx = -1;
+            m_sel_seg_idx   = -1;
+            if (!m_canvas->HasCapture()) m_canvas->CaptureMouse();
+            m_canvas->Refresh(false);
+            return;
+        }
+
+        // Priority 2: segment bodies
+        int body_seg = -1; double best_body = thr;
+        for (int si = 0; si < (int)layer.segments.size(); ++si) {
+            double t;
+            double d = DrawModeInputHandler::point_to_segment_distance(
+                pos, layer.segments[si].start, layer.segments[si].end, t);
+            if (d < best_body) { best_body = d; body_seg = si; }
+        }
+        m_sel_layer_idx = (body_seg >= 0) ? active : -1;
+        m_sel_seg_idx   = body_seg;
+        m_dragging_ep.reset();
+        m_is_dragging = false;
+        m_canvas->Refresh(false);
+        return;
+    }
+
+    // Drawing mode
     int active = m_session.active_layer;
     if (active < 0 || active >= m_session.layer_count()) {
         wxMessageBox("Add a layer first — click '+ Layer'.",
@@ -304,36 +438,59 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
         return;
     }
 
-    Vec2d pos = screen_to_plate(evt.GetPosition());
-
     if (!m_pending_start) {
-        // First click: record start point
         m_pending_start = pos;
     } else {
-        // Second click: commit segment, chain next start
         DrawSegment seg;
         seg.start     = *m_pending_start;
         seg.end       = pos;
         seg.is_travel = false;
         dispatch_command(std::make_unique<AddSegmentCommand>(active, std::move(seg)));
-
-        // Chain: end of previous segment is start of next
         m_pending_start = pos;
     }
-
     if (m_canvas) m_canvas->Refresh(false);
 }
 
 void DrawModePanel::on_canvas_right_down(wxMouseEvent&)
 {
-    // Cancel pending start
+    // Cancel pending draw or active drag
     m_pending_start.reset();
+    if (m_is_dragging) {
+        if (m_canvas->HasCapture()) m_canvas->ReleaseMouse();
+        m_is_dragging = false;
+        m_dragging_ep.reset();
+    }
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_canvas_left_up(wxMouseEvent& evt)
+{
+    if (!m_is_dragging || !m_dragging_ep.has_value()) { evt.Skip(); return; }
+    if (m_canvas->HasCapture()) m_canvas->ReleaseMouse();
+
+    const EndpointRef& ep = *m_dragging_ep;
+    if (ep.layer_index >= 0 && ep.layer_index < m_session.layer_count()
+            && ep.segment_index >= 0
+            && ep.segment_index < (int)m_session.layers[ep.layer_index].segments.size()) {
+        const DrawSegment& seg = m_session.layers[ep.layer_index].segments[ep.segment_index];
+        Vec2d old_pos = ep.is_start ? seg.start : seg.end;
+        Vec2d new_pos = m_drag_preview;
+        // Only commit if actually moved
+        if ((new_pos - old_pos).squaredNorm() > 1e-12) {
+            dispatch_command(std::make_unique<MoveEndpointCommand>(
+                ep.layer_index, ep.segment_index, ep.is_start, old_pos, new_pos));
+        }
+    }
+    m_dragging_ep.reset();
+    m_is_dragging = false;
     if (m_canvas) m_canvas->Refresh(false);
 }
 
 void DrawModePanel::on_canvas_motion(wxMouseEvent& evt)
 {
     m_mouse_plate = screen_to_plate(evt.GetPosition());
+    if (m_is_dragging)
+        m_drag_preview = m_mouse_plate;
     if (m_canvas) m_canvas->Refresh(false);
     evt.Skip();
 }
@@ -343,6 +500,12 @@ void DrawModePanel::on_draw_toggle(wxCommandEvent&)
     m_input_mode = DrawInputMode::Drawing;
     m_draw_toggle->SetValue(true);
     m_edit_toggle->SetValue(false);
+    // Clear any pending edit state
+    m_sel_layer_idx = -1;
+    m_sel_seg_idx   = -1;
+    m_dragging_ep.reset();
+    m_is_dragging   = false;
+    if (m_canvas) m_canvas->Refresh(false);
 }
 
 void DrawModePanel::on_edit_toggle(wxCommandEvent&)
@@ -350,6 +513,9 @@ void DrawModePanel::on_edit_toggle(wxCommandEvent&)
     m_input_mode = DrawInputMode::Editing;
     m_edit_toggle->SetValue(true);
     m_draw_toggle->SetValue(false);
+    // Cancel any in-progress draw
+    m_pending_start.reset();
+    if (m_canvas) m_canvas->Refresh(false);
 }
 
 void DrawModePanel::on_prev_layer(wxCommandEvent&)
@@ -464,16 +630,16 @@ bool DrawModePanel::apply_session_to_model()
 
     if (!m_plater) return false;
 
-    // Read nozzle diameter from active printer preset
-    double nozzle_d = 0.4;
+    // Refresh cached nozzle diameter from active printer preset
+    m_nozzle_d = 0.4;
     if (wxGetApp().preset_bundle) {
         const auto& pcfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
         if (auto* nd = pcfg.option<ConfigOptionFloats>("nozzle_diameter"))
-            if (!nd->values.empty()) nozzle_d = nd->values.front();
+            if (!nd->values.empty()) m_nozzle_d = nd->values.front();
     }
 
     // Build a mesh that exactly represents the drawn paths (one box per segment)
-    TriangleMesh path_mesh = make_draw_path_mesh(m_session, nozzle_d);
+    TriangleMesh path_mesh = make_draw_path_mesh(m_session, m_nozzle_d);
     if (path_mesh.empty()) {
         wxMessageBox("No drawable segments found.", "Draw Mode",
             wxOK | wxICON_INFORMATION, this);
@@ -590,7 +756,24 @@ void DrawModePanel::on_char_hook(wxKeyEvent& evt)
             return; // swallowed
         }
     }
+
+    // Delete/Backspace in Editing mode removes the selected segment
+    if (m_input_mode == DrawInputMode::Editing && m_sel_seg_idx >= 0) {
+        int kc = evt.GetKeyCode();
+        if (kc == WXK_DELETE || kc == WXK_BACK) {
+            dispatch_command(std::make_unique<DeleteSegmentCommand>(m_sel_layer_idx, m_sel_seg_idx));
+            m_sel_layer_idx = -1;
+            m_sel_seg_idx   = -1;
+            return;
+        }
+    }
     evt.Skip();
+}
+
+void DrawModePanel::on_fill_toggle(wxCommandEvent&)
+{
+    m_show_filled = m_fill_toggle->GetValue();
+    if (m_canvas) m_canvas->Refresh(false);
 }
 
 } // namespace GUI
