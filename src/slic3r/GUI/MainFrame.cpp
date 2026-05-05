@@ -1273,7 +1273,7 @@ void MainFrame::init_tabpanel() {
         else if (panel == m_monitor) {
             //monitor
         }
-        else if (panel == m_draw_mode_panel) {
+        else if (m_draw_mode_panel != nullptr && panel == m_draw_mode_panel) {
             // Activate draw mode: snapshot current plate origin
             PartPlate* plate = nullptr;
             if (m_plater) {
