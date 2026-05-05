@@ -14,6 +14,7 @@
 #include <wx/button.h>
 #include <wx/tglbtn.h>
 #include <wx/msgdlg.h>
+#include <wx/dcbuffer.h>
 
 #include <algorithm>
 
@@ -209,7 +210,7 @@ void DrawModePanel::on_canvas_erase_bg(wxEraseEvent&) { /* suppress flicker */ }
 
 void DrawModePanel::on_canvas_paint(wxPaintEvent&)
 {
-    wxPaintDC dc(m_canvas);
+    wxAutoBufferedPaintDC dc(m_canvas);
     wxSize sz = m_canvas->GetClientSize();
 
     // Background
@@ -383,6 +384,73 @@ void DrawModePanel::on_clear_layer(wxCommandEvent&)
     dispatch_command(std::make_unique<ClearLayerCommand>(active));
 }
 
+// Build a TriangleMesh that visually represents the drawn paths as flat
+// rectangular prisms: width = nozzle_diameter, height = layer_height.
+// Each DrawSegment becomes one box oriented along the segment direction.
+static TriangleMesh make_draw_path_mesh(const DrawSession& session, double nozzle_d)
+{
+    std::vector<Vec3f>   verts;
+    std::vector<Vec3i32> faces;
+
+    for (const DrawLayer& layer : session.layers) {
+        const float zb  = static_cast<float>(layer.z_start);
+        const float zt  = static_cast<float>(layer.z_end);
+        const float hw  = static_cast<float>(nozzle_d / 2.0);
+
+        for (const DrawSegment& seg : layer.segments) {
+            Vec2d d   = seg.end - seg.start;
+            double len = d.norm();
+            if (len < 1e-6) continue;
+
+            Vec2d dir  = d / len;
+            // 2-D perpendicular (rotated 90° CCW)
+            Vec2d perp(-dir.y(), dir.x());
+
+            float ax = static_cast<float>(seg.start.x());
+            float ay = static_cast<float>(seg.start.y());
+            float bx = static_cast<float>(seg.end.x());
+            float by = static_cast<float>(seg.end.y());
+            float px = static_cast<float>(perp.x() * nozzle_d / 2.0);
+            float py = static_cast<float>(perp.y() * nozzle_d / 2.0);
+
+            // 8 vertices of the rectangular prism
+            // Bottom ring (z = zb): v0..v3, Top ring (z = zt): v4..v7
+            const int b = static_cast<int>(verts.size());
+            verts.emplace_back(ax - px, ay - py, zb); // b+0 start-left  bot
+            verts.emplace_back(ax + px, ay + py, zb); // b+1 start-right bot
+            verts.emplace_back(bx + px, by + py, zb); // b+2 end-right   bot
+            verts.emplace_back(bx - px, by - py, zb); // b+3 end-left    bot
+            verts.emplace_back(ax - px, ay - py, zt); // b+4 start-left  top
+            verts.emplace_back(ax + px, ay + py, zt); // b+5 start-right top
+            verts.emplace_back(bx + px, by + py, zt); // b+6 end-right   top
+            verts.emplace_back(bx - px, by - py, zt); // b+7 end-left    top
+
+            // 12 triangles — winding gives outward normals (right-hand rule)
+            // Bottom face (-Z normal)
+            faces.emplace_back(b+0, b+1, b+2);
+            faces.emplace_back(b+0, b+2, b+3);
+            // Top face (+Z normal)
+            faces.emplace_back(b+4, b+6, b+5);
+            faces.emplace_back(b+4, b+7, b+6);
+            // Start cap (-dir normal)
+            faces.emplace_back(b+0, b+4, b+5);
+            faces.emplace_back(b+0, b+5, b+1);
+            // End cap (+dir normal)
+            faces.emplace_back(b+2, b+6, b+3);
+            faces.emplace_back(b+3, b+6, b+7);
+            // Right side (+perp normal)
+            faces.emplace_back(b+1, b+5, b+2);
+            faces.emplace_back(b+2, b+5, b+6);
+            // Left side (-perp normal)
+            faces.emplace_back(b+0, b+3, b+7);
+            faces.emplace_back(b+0, b+7, b+4);
+        }
+    }
+
+    if (verts.empty()) return TriangleMesh();
+    return TriangleMesh(verts, faces);
+}
+
 void DrawModePanel::on_finalize(wxCommandEvent&)
 {
     if (m_session.is_empty()) {
@@ -393,13 +461,21 @@ void DrawModePanel::on_finalize(wxCommandEvent&)
 
     if (!m_plater) return;
 
-    // Compute bounding box and build a synthetic placeholder mesh
-    BoundingBoxf3 bbox = m_session.bounding_box();
-    double dx = std::max(bbox.max.x() - bbox.min.x(), 1.0);
-    double dy = std::max(bbox.max.y() - bbox.min.y(), 1.0);
-    double dz = std::max(m_session.total_height(), 1.0);
+    // Read nozzle diameter from active printer preset
+    double nozzle_d = 0.4;
+    if (wxGetApp().preset_bundle) {
+        const auto& pcfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        if (auto* nd = pcfg.option<ConfigOptionFloats>("nozzle_diameter"))
+            if (!nd->values.empty()) nozzle_d = nd->values.front();
+    }
 
-    TriangleMesh placeholder = make_cube(dx, dy, dz);
+    // Build a mesh that exactly represents the drawn paths (one box per segment)
+    TriangleMesh path_mesh = make_draw_path_mesh(m_session, nozzle_d);
+    if (path_mesh.empty()) {
+        wxMessageBox("No drawable segments found.", "Draw Mode",
+            wxOK | wxICON_INFORMATION, this);
+        return;
+    }
 
     Model& model = m_plater->model();
 
@@ -410,13 +486,14 @@ void DrawModePanel::on_finalize(wxCommandEvent&)
         obj->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
     } else {
         // New object
-        ModelObject* obj = model.add_object("DrawPathObject", "", std::move(placeholder));
+        ModelObject* obj = model.add_object("DrawPathObject", "", std::move(path_mesh));
         obj->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
         obj->draw_session = std::make_unique<DrawSession>(m_session);
 
-        // Add a single instance at plate origin
+        // Instance offset: segments are in plate-relative coords,
+        // so place the object at the plate's world origin.
         ModelInstance* inst = obj->add_instance();
-        inst->set_offset(Vec3d(m_plate_x + bbox.min.x(), m_plate_y + bbox.min.y(), 0.0));
+        inst->set_offset(Vec3d(m_plate_x, m_plate_y, 0.0));
     }
 
     m_plater->update();
