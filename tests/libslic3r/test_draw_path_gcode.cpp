@@ -245,3 +245,126 @@ TEST_CASE("DrawPathGCodeGenerator: plate_origin shifts all XY coordinates", "[Dr
     // The G1 extrusion line should contain X110 (10 + 100 offset).
     REQUIRE(gcode.find("X110") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// Integration smoke test: multi-layer full-path validation
+// ---------------------------------------------------------------------------
+TEST_CASE("DrawPathGCodeGenerator: multi-layer smoke test", "[DrawPathGCodeGenerator]")
+{
+    // Build a 3-layer session with a mix of extrusions and travel moves.
+    // Layer 0: extrude 10mm, travel 5mm, extrude 8mm
+    // Layer 1: extrude 15mm, travel 10mm
+    // Layer 2: extrude 5mm
+    DrawSession session;
+
+    session.add_layer(0.2);
+    {
+        DrawLayer& l = session.layers.back();
+        DrawSegment s0; s0.start = Vec2d(0,0);  s0.end = Vec2d(10,0);  s0.is_travel = false; l.segments.push_back(s0);
+        DrawSegment s1; s1.start = Vec2d(10,0); s1.end = Vec2d(15,0);  s1.is_travel = true;  l.segments.push_back(s1);
+        DrawSegment s2; s2.start = Vec2d(15,0); s2.end = Vec2d(23,0);  s2.is_travel = false; l.segments.push_back(s2);
+    }
+    session.add_layer(0.2);
+    {
+        DrawLayer& l = session.layers.back();
+        DrawSegment s3; s3.start = Vec2d(0,0);  s3.end = Vec2d(15,0);  s3.is_travel = false; l.segments.push_back(s3);
+        DrawSegment s4; s4.start = Vec2d(15,0); s4.end = Vec2d(25,0);  s4.is_travel = true;  l.segments.push_back(s4);
+    }
+    session.add_layer(0.2);
+    {
+        DrawLayer& l = session.layers.back();
+        DrawSegment s5; s5.start = Vec2d(0,0);  s5.end = Vec2d(5,0);   s5.is_travel = false; l.segments.push_back(s5);
+    }
+
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    std::string gcode = gen.generate(session);
+
+    // 1. G-code must be non-empty and contain the preamble marker.
+    REQUIRE(!gcode.empty());
+    REQUIRE(gcode.find("G90") != std::string::npos);   // absolute positioning from preamble
+
+    // 2. Temperature commands must appear (nozzle heat-up from preamble).
+    REQUIRE(gcode.find("M104") != std::string::npos);  // set extruder temperature
+
+    // 3. Z values must increase monotonically across layers (non-decreasing).
+    std::vector<double> zvals;
+    {
+        std::size_t pos = 0;
+        while (pos < gcode.size()) {
+            std::size_t line_end = gcode.find('\n', pos);
+            if (line_end == std::string::npos) line_end = gcode.size();
+            std::string line = gcode.substr(pos, line_end - pos);
+            if (line.size() >= 3 && (line[0] == 'G') && (line[1] == '0' || line[1] == '1') && line[2] == ' ') {
+                auto z_pos = line.find(" Z");
+                if (z_pos != std::string::npos)
+                    zvals.push_back(std::stod(line.substr(z_pos + 2)));
+            }
+            pos = line_end + 1;
+        }
+    }
+    REQUIRE(zvals.size() >= 3);  // at least one Z per layer
+    for (std::size_t i = 1; i < zvals.size(); ++i)
+        REQUIRE(zvals[i] >= zvals[i - 1] - 1e-9);
+
+    // 4. Extrusion moves: use delta-based tracking (E_new > E_prev = positive material flow).
+    //    With absolute E positioning, retractions bring E down; extrusions and unretracts
+    //    bring it up. We count positive-delta G1 E lines: 4 extrusion segments
+    //    + N unretracts (layer changes, post-travel) — expect at least 4.
+    int extrusion_like_count = 0;
+    double tracked_e = 0.0;  // E is reset to 0 by G92 E0 in preamble
+    {
+        std::size_t pos = 0;
+        while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
+            std::size_t line_end = gcode.find('\n', pos);
+            auto e_pos = gcode.find(" E", pos);
+            if (e_pos != std::string::npos && e_pos < line_end) {
+                std::size_t val_start = e_pos + 2;
+                double val = std::stod(gcode.substr(val_start,
+                    gcode.find_first_of(" \n\r", val_start) - val_start));
+                if (val > tracked_e + 1e-9)  // positive delta = material deposited or unretracted
+                    ++extrusion_like_count;
+                tracked_e = val;
+            }
+            pos = (line_end != std::string::npos) ? line_end + 1 : std::string::npos;
+        }
+    }
+    // 4 extrusion segments + unretracts (layer changes + post-travel moves) → at least 4
+    REQUIRE(extrusion_like_count >= 4);
+
+    // 5. Travel segments: count G1 lines without E in the main body.
+    //    Session has 2 travel segments (s1, s4) — but travel may also emit an
+    //    unretract G1 before it, so we just verify at least 2 G1 lines have no E.
+    int travel_count = 0;
+    {
+        std::size_t pos = 0;
+        while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
+            std::size_t line_end = gcode.find('\n', pos);
+            if (gcode.find(" E", pos) >= line_end)  // no E on this line
+                ++travel_count;
+            pos = (line_end != std::string::npos) ? line_end + 1 : std::string::npos;
+        }
+    }
+    REQUIRE(travel_count >= 2);
+
+    // 6. Extrusion E deltas must be positive and bounded by a sane maximum.
+    //    Max theoretical E for 15mm at 0.4×0.2 nozzle/layer: ~0.5
+    {
+        double prev_e = 0.0;
+        std::size_t pos = 0;
+        while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
+            std::size_t line_end = gcode.find('\n', pos);
+            auto e_pos = gcode.find(" E", pos);
+            if (e_pos != std::string::npos && e_pos < line_end) {
+                std::size_t val_start = e_pos + 2;
+                double val = std::stod(gcode.substr(val_start,
+                    gcode.find_first_of(" \n\r", val_start) - val_start));
+                double delta = val - prev_e;
+                if (delta > 1e-9)  // positive-delta move
+                    REQUIRE_THAT(delta, Catch::Matchers::WithinAbs(0.0, 1.0));  // < 1mm E per move
+                prev_e = val;
+            }
+            pos = (line_end != std::string::npos) ? line_end + 1 : std::string::npos;
+        }
+    }
+}
