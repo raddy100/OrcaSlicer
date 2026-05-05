@@ -5,12 +5,14 @@
 #include <wx/stattext.h>
 #include <wx/button.h>
 #include <wx/tglbtn.h>
+#include <wx/dcclient.h>
 
 #include "libslic3r/DrawSession.hpp"
 #include "DrawModeCommands.hpp"
 #include "DrawModeInputHandler.hpp"
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace Slic3r {
@@ -50,7 +52,7 @@ private:
     // UI widgets
     wxStaticText*      m_banner_text    { nullptr };
     wxStaticText*      m_layer_label    { nullptr };
-    wxStaticText*      m_canvas_placeholder { nullptr };
+    wxPanel*           m_canvas         { nullptr }; // 2-D drawing surface
     wxToggleButton*    m_draw_toggle    { nullptr };
     wxToggleButton*    m_edit_toggle    { nullptr };
     wxButton*          m_prev_layer_btn { nullptr };
@@ -69,6 +71,12 @@ private:
     double       m_plate_x { 0.0 };
     double       m_plate_y { 0.0 };
 
+    // 2-D canvas state
+    std::optional<Vec2d> m_pending_start;       // first click waiting for second
+    Vec2d                m_mouse_plate { 0.0, 0.0 }; // current mouse in plate-mm
+    double               m_plate_w_mm  { 256.0 };
+    double               m_plate_h_mm  { 256.0 };
+
     // Command stacks for undo/redo
     std::vector<std::unique_ptr<DrawCommand>> m_undo_stack;
     std::vector<std::unique_ptr<DrawCommand>> m_redo_stack;
@@ -77,6 +85,17 @@ private:
     void update_banner();
     void update_layer_label();
     void dispatch_command(std::unique_ptr<DrawCommand> cmd);
+
+    // Coordinate conversion between canvas pixels and plate-space mm
+    Vec2d   screen_to_plate(wxPoint pt) const;
+    wxPoint plate_to_screen(Vec2d   pt) const;
+
+    // Canvas event handlers
+    void on_canvas_paint(wxPaintEvent&);
+    void on_canvas_erase_bg(wxEraseEvent&);
+    void on_canvas_left_down(wxMouseEvent&);
+    void on_canvas_right_down(wxMouseEvent&);
+    void on_canvas_motion(wxMouseEvent&);
 
     // Button handlers
     void on_draw_toggle(wxCommandEvent& evt);
