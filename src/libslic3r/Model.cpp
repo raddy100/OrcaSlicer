@@ -1142,6 +1142,11 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->cut_id.copy(rhs.cut_id);
     this->copy_transformation_caches(rhs);
 
+    // Draw Mode: deep-copy the draw session (unique_ptr must be cloned, not moved).
+    this->draw_session = rhs.draw_session
+        ? std::make_unique<DrawSession>(*rhs.draw_session)
+        : nullptr;
+
     this->clear_volumes();
     this->volumes.reserve(rhs.volumes.size());
     for (ModelVolume *model_volume : rhs.volumes) {
@@ -1180,6 +1185,9 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->printable                   = std::move(rhs.printable);
     this->origin_translation          = std::move(rhs.origin_translation);
     this->copy_transformation_caches(rhs);
+
+    // Draw Mode: move the draw session (rhs becomes invalid after move).
+    this->draw_session = std::move(rhs.draw_session);
 
     this->clear_volumes();
 	this->volumes = std::move(rhs.volumes);

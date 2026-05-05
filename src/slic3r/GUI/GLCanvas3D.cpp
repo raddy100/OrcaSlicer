@@ -4176,6 +4176,14 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         volume->force_sinking_contours = false;
     }
 
+    // Draw Mode: route all mouse events to the Draw Mode handler (stub for MVP).
+    // The actual input logic is wired by DrawModePanel which owns its own GLCanvas3D.
+    if (m_canvas_type == CanvasDrawMode) {
+        // All mouse handling for draw mode is managed by DrawModePanel.
+        // Nothing to do here for now.
+        return;
+    }
+
     auto show_sinking_contours = [this]() {
         const Selection::IndicesList& idxs = m_selection.get_volume_idxs();
         for (unsigned int idx : idxs) {

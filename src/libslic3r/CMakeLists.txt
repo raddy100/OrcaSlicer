@@ -105,6 +105,10 @@ set(lisbslic3r_sources
     CustomGCode.hpp
     CutUtils.cpp
     CutUtils.hpp
+    DrawSession.cpp
+    DrawSession.hpp
+    DrawPathGCodeGenerator.cpp
+    DrawPathGCodeGenerator.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp

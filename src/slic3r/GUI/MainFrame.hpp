@@ -52,6 +52,7 @@ class PrintHostQueueDialog;
 class Plater;
 class MainFrame;
 class ParamsDialog;
+class DrawModePanel;
 #ifdef __WXGTK__
 class ResizeEdgePanel;
 #endif
@@ -226,6 +227,7 @@ public:
         tpCalibration   = 6,
         tpAuxiliary     = 7,
         toDebugTool     = 8,
+        tpDrawMode      = 9,
     };
 
     //BBS: add slice&&print status update logic
@@ -386,6 +388,7 @@ public:
     WebViewPanel*         m_webview { nullptr };
     PrinterWebView*       m_printer_view{nullptr};
     wxLogWindow*          m_log_window { nullptr };
+    DrawModePanel*        m_draw_mode_panel{ nullptr };
     // BBS
     //wxBookCtrlBase*       m_tabpanel { nullptr };
     Notebook*             m_tabpanel{ nullptr };

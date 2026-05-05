@@ -63,6 +63,7 @@
 #include "Widgets/WebView.hpp"
 #include "DailyTips.hpp"
 #include "FilamentMapDialog.hpp"
+#include "DrawModePanel.hpp"
 
 #include "DeviceCore/DevManager.h"
 
@@ -1272,6 +1273,15 @@ void MainFrame::init_tabpanel() {
         else if (panel == m_monitor) {
             //monitor
         }
+        else if (panel == m_draw_mode_panel) {
+            // Activate draw mode: snapshot current plate origin
+            PartPlate* plate = nullptr;
+            if (m_plater) {
+                auto& plist = m_plater->get_partplate_list();
+                plate = plist.get_curr_plate();
+            }
+            m_draw_mode_panel->activate(plate);
+        }
 #ifndef __APPLE__
         if (sel == tp3DEditor) {
             m_topbar->EnableUndoRedoItems();
@@ -1350,6 +1360,11 @@ void MainFrame::init_tabpanel() {
     m_calibration = new CalibrationPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
     m_calibration->SetBackgroundColour(*wxWHITE);
     m_tabpanel->AddPage(m_calibration, _L("Calibration"), std::string("tab_calibration_active"), std::string("tab_calibration_active"), false);
+
+    // Draw Mode tab (MVP)
+    m_draw_mode_panel = new DrawModePanel(m_tabpanel, m_plater);
+    m_draw_mode_panel->SetBackgroundColour(*wxWHITE);
+    m_tabpanel->AddPage(m_draw_mode_panel, _L("Draw"), std::string("tab_auxiliary_active"), std::string("tab_auxiliary_active"), false);
 
     if (m_plater) {
         // load initial config

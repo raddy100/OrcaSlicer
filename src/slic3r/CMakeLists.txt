@@ -107,6 +107,12 @@ set(SLIC3R_GUI_SOURCES
     GUI/DownloadProgressDialog.hpp
     GUI/DragCanvas.cpp
     GUI/DragCanvas.hpp
+    GUI/DrawModeCommands.hpp
+    GUI/DrawModeCommands.cpp
+    GUI/DrawModeInputHandler.hpp
+    GUI/DrawModeInputHandler.cpp
+    GUI/DrawModePanel.hpp
+    GUI/DrawModePanel.cpp
     GUI/EditGCodeDialog.cpp
     GUI/EditGCodeDialog.hpp
     GUI/EncodedFilament.hpp

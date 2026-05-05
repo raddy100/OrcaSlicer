@@ -36,6 +36,10 @@
 //#include "RemovableDriveManager.hpp"
 
 #include "slic3r/GUI/Plater.hpp"
+#include "libslic3r/DrawPathGCodeGenerator.hpp"
+#include "libslic3r/Model.hpp"
+
+#include <algorithm>
 
 namespace Slic3r {
 
@@ -226,26 +230,68 @@ void BackgroundSlicingProcess::process_fff()
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: will start slicing, reset gcode_result %2% firstly")%__LINE__%m_gcode_result;
 		m_gcode_result->reset();
 
-		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: gcode_result reseted, will start print::process")%__LINE__;
-		m_print->process();
-		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: after print::process, send slicing complete event to gui...")%__LINE__;
-        if (m_current_plate->get_real_filament_map_mode(preset_bundle.project_config) < FilamentMapMode::fmmManual) {
-            std::vector<int> f_maps = m_fff_print->get_filament_maps();
-            m_current_plate->set_filament_maps(f_maps);
-		}
-		wxCommandEvent evt(m_event_slicing_completed_id);
-		// Post the Slicing Finished message for the G-code viewer to update.
-		// Passing the timestamp
-		evt.SetInt((int)(m_fff_print->step_state_with_timestamp(PrintStep::psSlicingFinished).timestamp));
-		wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt.Clone());
+		// --- DRAW MODE: if every object on this plate is a draw-path object,
+		//     generate G-code directly and skip the normal slicing pipeline. ---
+		ModelObjectPtrs plate_objects = m_current_plate->get_objects_on_this_plate();
+		const bool all_draw_path = !plate_objects.empty() &&
+		    std::all_of(plate_objects.begin(), plate_objects.end(),
+		        [](const ModelObject* o) { return o->is_draw_path_object(); });
 
-		//BBS: add plate index into render params
-		m_temp_output_path = this->get_current_plate()->get_tmp_gcode_path();
-		m_fff_print->export_gcode(m_temp_output_path, m_gcode_result, [this](const ThumbnailsParams& params) { return this->render_thumbnails(params); });
-		if(m_fff_print->is_BBL_printer())
-			run_post_process_scripts(m_temp_output_path, false, "File", m_temp_output_path, m_fff_print->full_print_config());
+		if (all_draw_path) {
+		    BOOST_LOG_TRIVIAL(info) << __FUNCTION__
+		        << boost::format(" %1%: draw-path plate detected — generating G-code via DrawPathGCodeGenerator") % __LINE__;
+		    m_fff_print->set_status(10, _utf8(L("Generating draw-path G-code...")));
 
-		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": export gcode finished");
+		    DynamicPrintConfig config = wxGetApp().preset_bundle->full_config();
+		    const Vec3d        origin = m_current_plate->get_origin();
+		    DrawPathGCodeGenerator gen(config, Vec2d(origin.x(), origin.y()));
+
+		    // Collect (session*, instance_offset) for every instance on the plate.
+		    std::vector<DrawPathGCodeGenerator::BatchItem> batch;
+		    for (const ModelObject* obj : plate_objects) {
+		        if (!obj->draw_session) continue;
+		        for (const ModelInstance* inst : obj->instances) {
+		            const Vec3d off = inst->get_offset();
+		            batch.emplace_back(obj->draw_session.get(), Vec2d(off.x(), off.y()));
+		        }
+		    }
+
+		    const std::string gcode = gen.generate_batch(batch);
+
+		    m_temp_output_path = m_current_plate->get_tmp_gcode_path();
+		    if (FILE* f = boost::nowide::fopen(m_temp_output_path.c_str(), "wb")) {
+		        std::fwrite(gcode.data(), 1, gcode.size(), f);
+		        std::fclose(f);
+		    }
+
+		    m_fff_print->set_status(80, _utf8(L("Draw-path G-code complete")));
+		    wxCommandEvent evt(m_event_slicing_completed_id);
+		    evt.SetInt(0); // no slicer-step timestamp for draw-path objects
+		    wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt.Clone());
+
+		} else {
+		    // Normal slicing pipeline.
+		    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: gcode_result reseted, will start print::process")%__LINE__;
+		    m_print->process();
+		    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: after print::process, send slicing complete event to gui...")%__LINE__;
+		    if (m_current_plate->get_real_filament_map_mode(preset_bundle.project_config) < FilamentMapMode::fmmManual) {
+		        std::vector<int> f_maps = m_fff_print->get_filament_maps();
+		        m_current_plate->set_filament_maps(f_maps);
+		    }
+		    wxCommandEvent evt(m_event_slicing_completed_id);
+		    // Post the Slicing Finished message for the G-code viewer to update.
+		    // Passing the timestamp
+		    evt.SetInt((int)(m_fff_print->step_state_with_timestamp(PrintStep::psSlicingFinished).timestamp));
+		    wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt.Clone());
+
+		    //BBS: add plate index into render params
+		    m_temp_output_path = this->get_current_plate()->get_tmp_gcode_path();
+		    m_fff_print->export_gcode(m_temp_output_path, m_gcode_result, [this](const ThumbnailsParams& params) { return this->render_thumbnails(params); });
+		    if(m_fff_print->is_BBL_printer())
+		        run_post_process_scripts(m_temp_output_path, false, "File", m_temp_output_path, m_fff_print->full_print_config());
+
+		    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": export gcode finished");
+		} // end else (normal slicing pipeline)
 	}
 	if (this->set_step_started(bspsGCodeFinalize)) {
 	    if (! m_export_path.empty()) {

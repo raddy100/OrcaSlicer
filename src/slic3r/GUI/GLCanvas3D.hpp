@@ -511,6 +511,7 @@ public:
         CanvasView3D = 0,
         CanvasPreview = 1,
         CanvasAssembleView = 2,
+        CanvasDrawMode = 3, // Draw Mode: author toolpaths by drawing on a 2D canvas
     };
 
     int GetHoverId();

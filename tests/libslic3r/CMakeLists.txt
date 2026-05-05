@@ -10,6 +10,8 @@ add_executable(${_TEST_NAME}_tests
     test_clipper_utils.cpp
     test_config.cpp
     test_preset_bundle_loading.cpp
+    test_draw_session.cpp
+    test_draw_path_gcode.cpp
     test_elephant_foot_compensation.cpp
     test_geometry.cpp
     test_placeholder_parser.cpp

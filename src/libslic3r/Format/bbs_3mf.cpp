@@ -222,6 +222,7 @@ const std::string PROJECT_EMBEDDED_SLICE_PRESETS_FILE = "Metadata/process_settin
 const std::string PROJECT_EMBEDDED_FILAMENT_PRESETS_FILE = "Metadata/filament_settings_";
 const std::string PROJECT_EMBEDDED_PRINTER_PRESETS_FILE = "Metadata/machine_settings_";
 const std::string CUT_INFORMATION_FILE = "Metadata/cut_information.xml";
+const std::string DRAW_SESSION_FILE_PREFIX = "Metadata/draw_session_obj_"; // + <1-based-obj-idx>.xml
 
 const unsigned int AUXILIARY_STR_LEN = 12;
 const unsigned int METADATA_STR_LEN = 9;
@@ -1073,6 +1074,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         IdToLayerHeightsProfileMap m_layer_heights_profiles;
         IdToLayerConfigRangesMap m_layer_config_ranges;
         IdToBrimPointsMap m_brim_ear_points;
+        // Draw Mode: keyed by 1-based object index, same convention as m_cut_object_infos.
+        std::map<int, DrawSession> m_draw_sessions;
         /*IdToSlaSupportPointsMap m_sla_support_points;
         IdToSlaDrainHolesMap    m_sla_drain_holes;*/
         PathToEmbossShapeFileMap m_path_to_emboss_shape_files;
@@ -1140,6 +1143,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         void _extract_sla_support_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_sla_drain_holes_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_brim_ear_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
+        // Draw Mode: filename includes the 1-based object index suffix.
+        void _extract_draw_session_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, const std::string& filename);
 
         void _extract_custom_gcode_per_print_z_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
 
@@ -1872,6 +1877,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // extract object cut info
                     _extract_cut_information_from_archive(archive, stat, config_substitutions);
                 }
+                else if (boost::algorithm::istarts_with(name, DRAW_SESSION_FILE_PREFIX)) {
+                    // Draw Mode: restore drawn-path geometry for a specific object.
+                    _extract_draw_session_from_archive(archive, stat, name);
+                }
                 //BBS: project embedded presets
                 else if (!dont_load_config && boost::algorithm::istarts_with(name, PROJECT_EMBEDDED_PRINT_PRESETS_FILE)) {
                     // extract slic3r layer config ranges file
@@ -2122,6 +2131,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     model_object->volumes[connector.volume_id]->cut_info = 
                         ModelVolume::CutInfo(CutConnectorType(connector.type), connector.r_tolerance, connector.h_tolerance, true);
                 }
+            }
+
+            // Apply draw session for object if any was loaded.
+            // m_draw_sessions are indexed by a 1-based model object index.
+            auto draw_session_it = m_draw_sessions.find(object.second + 1);
+            if (draw_session_it != m_draw_sessions.end()) {
+                model_object->draw_session = std::make_unique<DrawSession>(std::move(draw_session_it->second));
+                // Ensure the config flag is consistent with the session being present.
+                model_object->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
             }
         }
 
@@ -2547,6 +2565,64 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 CutObjectInfo cut_info {cut_id, connectors};
                 m_cut_object_infos.insert({ obj_idx, cut_info });
             }
+        }
+    }
+
+    void _BBS_3MF_Importer::_extract_draw_session_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, const std::string& filename)
+    {
+        // Parse the 1-based object index from "Metadata/draw_session_obj_<N>.xml"
+        std::string prefix = DRAW_SESSION_FILE_PREFIX;
+        std::string suffix_str = filename.substr(prefix.size()); // "<N>.xml"
+        size_t dot = suffix_str.rfind('.');
+        if (dot == std::string::npos) return;
+        int obj_idx = 0;
+        try {
+            obj_idx = std::stoi(suffix_str.substr(0, dot));
+        } catch (...) {
+            add_error("Invalid draw session filename: " + filename);
+            return;
+        }
+        if (obj_idx <= 0) return;
+
+        if (stat.m_uncomp_size == 0) return;
+        std::string buffer((size_t)stat.m_uncomp_size, 0);
+        mz_bool res = mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, (void*)buffer.data(), (size_t)stat.m_uncomp_size, 0);
+        if (res == 0) {
+            add_error("Error reading draw session data: " + filename);
+            return;
+        }
+
+        try {
+            std::istringstream iss(buffer);
+            pt::ptree tree;
+            pt::read_xml(iss, tree);
+
+            DrawSession session;
+            for (const auto& layer_kv : tree.get_child("draw_session")) {
+                if (layer_kv.first != "layer") continue;
+                const pt::ptree& lt = layer_kv.second;
+
+                DrawLayer layer;
+                layer.layer_index = lt.get<int>("<xmlattr>.index");
+                layer.z_start     = lt.get<double>("<xmlattr>.z_start");
+                layer.z_end       = lt.get<double>("<xmlattr>.z_end");
+
+                for (const auto& seg_kv : lt) {
+                    if (seg_kv.first != "segment") continue;
+                    const pt::ptree& st = seg_kv.second;
+                    DrawSegment seg;
+                    seg.start     = Vec2d(st.get<double>("<xmlattr>.sx"), st.get<double>("<xmlattr>.sy"));
+                    seg.end       = Vec2d(st.get<double>("<xmlattr>.ex"), st.get<double>("<xmlattr>.ey"));
+                    seg.is_travel = st.get<int>("<xmlattr>.is_travel", 0) != 0;
+                    layer.segments.push_back(seg);
+                }
+                session.layers.push_back(layer);
+            }
+            session.active_layer = session.layers.empty() ? -1 : (int)session.layers.size() - 1;
+
+            m_draw_sessions.emplace(obj_idx, std::move(session));
+        } catch (const std::exception& e) {
+            add_error(std::string("Error parsing draw session XML: ") + e.what());
         }
     }
 
@@ -5755,6 +5831,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool _add_project_embedded_presets_to_archive(mz_zip_archive& archive, Model& model, std::vector<Preset*> project_presets);
         bool _add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config, int export_plate_idx = -1, bool save_gcode = true, bool use_loaded_id = false);
         bool _add_cut_information_file_to_archive(mz_zip_archive &archive, Model &model);
+        // Draw Mode: writes one XML file per draw-path object into the archive.
+        bool _add_draw_sessions_to_archive(mz_zip_archive &archive, Model &model);
         bool _add_slice_info_config_file_to_archive(mz_zip_archive &archive, const Model &model, PlateDataPtrs &plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config);
         bool _add_gcode_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, Export3mfProgressFn proFn = nullptr);
         bool _add_custom_gcode_per_print_z_file_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig* config);
@@ -6276,6 +6354,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         if (!_add_cut_information_file_to_archive(archive, model)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_cut_information_file_to_archive failed\n");
+            return false;
+        }
+
+        if (!_add_draw_sessions_to_archive(archive, model)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_draw_sessions_to_archive failed\n");
             return false;
         }
 
@@ -7321,6 +7404,51 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
         }
 
+        return true;
+    }
+
+    // Draw Mode: write one XML file per draw-path object into the archive.
+    bool _BBS_3MF_Exporter::_add_draw_sessions_to_archive(mz_zip_archive &archive, Model &model)
+    {
+        unsigned int obj_idx = 0;
+        for (const ModelObject* object : model.objects) {
+            ++obj_idx;
+            if (!object->is_draw_path_object() || !object->draw_session)
+                continue;
+
+            const DrawSession& session = *object->draw_session;
+            pt::ptree tree;
+            pt::ptree& root = tree.add("draw_session", "");
+            root.put("<xmlattr>.version", "1");
+            root.put("<xmlattr>.layer_count", session.layer_count());
+
+            for (const DrawLayer& layer : session.layers) {
+                pt::ptree& layer_node = root.add("layer", "");
+                layer_node.put("<xmlattr>.index",   layer.layer_index);
+                layer_node.put("<xmlattr>.z_start", layer.z_start);
+                layer_node.put("<xmlattr>.z_end",   layer.z_end);
+
+                for (const DrawSegment& seg : layer.segments) {
+                    pt::ptree& seg_node = layer_node.add("segment", "");
+                    seg_node.put("<xmlattr>.sx",       seg.start.x());
+                    seg_node.put("<xmlattr>.sy",       seg.start.y());
+                    seg_node.put("<xmlattr>.ex",       seg.end.x());
+                    seg_node.put("<xmlattr>.ey",       seg.end.y());
+                    seg_node.put("<xmlattr>.is_travel", seg.is_travel ? 1 : 0);
+                }
+            }
+
+            std::ostringstream oss;
+            pt::write_xml(oss, tree);
+            std::string out = oss.str();
+            boost::replace_all(out, "><", ">\n<");
+
+            std::string archive_path = DRAW_SESSION_FILE_PREFIX + std::to_string(obj_idx) + ".xml";
+            if (!mz_zip_writer_add_mem(&archive, archive_path.c_str(), out.data(), out.size(), MZ_DEFAULT_COMPRESSION)) {
+                add_error("Unable to add draw session file to archive: " + archive_path);
+                return false;
+            }
+        }
         return true;
     }
 

@@ -4025,6 +4025,14 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comDevelop;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Draw Mode internal flag — not shown in any user-facing tab.
+    def           = this->add("draw_path_object", coBool);
+    def->label    = L("Draw path object");
+    def->tooltip  = L("Internal: marks this object as a Draw Mode hand-drawn path object. "
+                       "Its G-code is produced by DrawPathGCodeGenerator, not the normal slicer pipeline.");
+    def->mode     = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("ironing_type", coEnum);
     def->label = L("Ironing Type");
     def->category = L("Quality");

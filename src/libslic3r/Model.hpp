@@ -19,6 +19,7 @@
 #include "TextConfiguration.hpp"
 #include "EmbossShape.hpp"
 #include "TriangleSelector.hpp"
+#include "DrawSession.hpp"
 
 //BBS: add bbs 3mf
 #include "Format/bbs_3mf.hpp"
@@ -399,6 +400,17 @@ public:
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors cut_connectors;
     CutObjectBase cut_id;
+
+    // Draw Mode: if set, this object was authored via the Draw Mode panel and
+    // this session holds the raw segment geometry. Null for all normal objects.
+    // PRD §Component 1 — keep in sync with bbs_3mf serialization (TASK-009/010).
+    std::unique_ptr<DrawSession> draw_session;
+
+    // Returns true when this object was authored via Draw Mode.
+    // The config flag and draw_session pointer must be consistent (invariant):
+    //   is_draw_path_object() iff draw_session != nullptr.
+    bool is_draw_path_object() const
+        { return config.has("draw_path_object") && config.get().opt_bool("draw_path_object"); }
 
     Model*                  get_model() { return m_model; }
     const Model*            get_model() const { return m_model; }

@@ -1038,6 +1038,12 @@ PRINT_CONFIG_CLASS_DEFINE(
 
     // Orca: internal use only
     ((ConfigOptionBool,  calib_flowrate_topinfill_special_order)) // ORCA: special flag for flow rate calibration
+
+    // Draw Mode: marks this ModelObject as a hand-drawn path object (not sliceable).
+    // When true, a DrawSession is stored on the parent ModelObject and
+    // G-code is produced by DrawPathGCodeGenerator instead of the normal pipeline.
+    // Default false — normal mesh objects are unaffected.
+    ((ConfigOptionBool,  draw_path_object))
 )
 
 // This object is mapped to Perl as Slic3r::Config::PrintRegion.

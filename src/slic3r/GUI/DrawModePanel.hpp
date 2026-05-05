@@ -1,0 +1,95 @@
+#pragma once
+
+#include <wx/panel.h>
+#include <wx/sizer.h>
+#include <wx/stattext.h>
+#include <wx/button.h>
+#include <wx/tglbtn.h>
+
+#include "libslic3r/DrawSession.hpp"
+#include "DrawModeCommands.hpp"
+#include "DrawModeInputHandler.hpp"
+
+#include <memory>
+#include <vector>
+
+namespace Slic3r {
+
+class DynamicPrintConfig;
+class ModelObject;
+
+namespace GUI {
+
+class Plater;
+struct PartPlate;
+
+// Draw Mode panel — lets users draw toolpaths directly on a 2D plate view
+// without needing a 3D model. Shown as a separate top-level tab.
+class DrawModePanel : public wxPanel
+{
+public:
+    DrawModePanel(wxWindow* parent, Plater* plater);
+    ~DrawModePanel();
+
+    // Called when user switches to the Draw tab.
+    // Snapshots the active plate and resets state for a new drawing session.
+    void activate(PartPlate* plate);
+
+    // Called when the user wants to edit an already-finalized draw object.
+    // Loads the existing DrawSession into the panel for modification.
+    void load_for_edit(ModelObject* obj, int obj_idx);
+
+    // Refresh UI labels.
+    void refresh();
+
+    // Undo/redo stacks — exposed so keyboard handler can check emptiness.
+    bool can_undo() const { return !m_undo_stack.empty(); }
+    bool can_redo() const { return !m_redo_stack.empty(); }
+
+private:
+    // UI widgets
+    wxStaticText*      m_banner_text    { nullptr };
+    wxStaticText*      m_layer_label    { nullptr };
+    wxStaticText*      m_canvas_placeholder { nullptr };
+    wxToggleButton*    m_draw_toggle    { nullptr };
+    wxToggleButton*    m_edit_toggle    { nullptr };
+    wxButton*          m_prev_layer_btn { nullptr };
+    wxButton*          m_next_layer_btn { nullptr };
+    wxButton*          m_add_layer_btn  { nullptr };
+    wxButton*          m_clear_btn      { nullptr };
+    wxButton*          m_finalize_btn   { nullptr };
+
+    // State
+    Plater*      m_plater        { nullptr };
+    DrawSession  m_session;
+    DrawInputMode m_input_mode   { DrawInputMode::Drawing };
+    int          m_editing_obj_idx{ -1 }; // >=0 when editing existing object
+
+    // Plate origin snapshot (plate-relative, set during activate())
+    double       m_plate_x { 0.0 };
+    double       m_plate_y { 0.0 };
+
+    // Command stacks for undo/redo
+    std::vector<std::unique_ptr<DrawCommand>> m_undo_stack;
+    std::vector<std::unique_ptr<DrawCommand>> m_redo_stack;
+
+    // Helpers
+    void update_banner();
+    void update_layer_label();
+    void dispatch_command(std::unique_ptr<DrawCommand> cmd);
+
+    // Button handlers
+    void on_draw_toggle(wxCommandEvent& evt);
+    void on_edit_toggle(wxCommandEvent& evt);
+    void on_prev_layer(wxCommandEvent& evt);
+    void on_next_layer(wxCommandEvent& evt);
+    void on_add_layer(wxCommandEvent& evt);
+    void on_clear_layer(wxCommandEvent& evt);
+    void on_finalize(wxCommandEvent& evt);
+
+    // Keyboard hook (Ctrl+Z / Ctrl+Y)
+    void on_char_hook(wxKeyEvent& evt);
+};
+
+} // namespace GUI
+} // namespace Slic3r
