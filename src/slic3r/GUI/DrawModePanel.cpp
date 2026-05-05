@@ -480,11 +480,42 @@ void DrawModePanel::on_finalize(wxCommandEvent&)
     Model& model = m_plater->model();
 
     if (m_editing_obj_idx >= 0 && m_editing_obj_idx < (int)model.objects.size()) {
-        // Re-edit path: replace session in place, preserve instances
+        // Re-edit path: replace mesh and session in place, preserve instances.
         ModelObject* obj = model.objects[m_editing_obj_idx];
+
+        // Remove all existing mesh volumes (the previous ribbon mesh).
+        while (!obj->volumes.empty())
+            obj->delete_volume(0);
+
+        // Add the freshly-built mesh as the single MODEL_PART volume.
+        // Pass false so the mesh is NOT auto-centered — it is already in
+        // plate-relative coordinates.
+        obj->add_volume(std::move(path_mesh), ModelVolumeType::MODEL_PART, false);
+
+        // Update stored draw session and config flag.
         obj->draw_session = std::make_unique<DrawSession>(m_session);
         obj->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+
+        // Invalidate cached bounding boxes so the 3D view re-computes them.
+        obj->invalidate_bounding_box();
     } else {
+        // TASK-019: guard against mixing draw-path objects with normal 3D models
+        // on the same plate. Check the current plate before adding.
+        PartPlate* curr_plate = m_plater->get_partplate_list().get_curr_plate();
+        if (curr_plate) {
+            auto existing = curr_plate->get_objects_on_this_plate();
+            bool plate_has_normal = std::any_of(existing.begin(), existing.end(),
+                [](const ModelObject* o){ return !o->is_draw_path_object(); });
+            if (plate_has_normal) {
+                wxMessageBox(
+                    "A plate cannot mix drawn-path objects with normal 3D models.\n"
+                    "Please move existing objects to a different plate first,\n"
+                    "or use a fresh plate for your drawing.",
+                    "Draw Mode", wxOK | wxICON_WARNING, this);
+                return;
+            }
+        }
+
         // New object
         ModelObject* obj = model.add_object("DrawPathObject", "", std::move(path_mesh));
         obj->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
@@ -498,6 +529,15 @@ void DrawModePanel::on_finalize(wxCommandEvent&)
 
     m_plater->update();
     wxGetApp().obj_list()->update_after_undo_redo();
+
+    // Reset panel state so user can start a fresh drawing session.
+    m_editing_obj_idx = -1;
+    m_session         = DrawSession();
+    m_undo_stack.clear();
+    m_redo_stack.clear();
+    m_pending_start.reset();
+    update_banner();
+    update_layer_label();
 
     // Switch back to 3D Editor tab
     wxGetApp().mainframe->select_tab((size_t)MainFrame::tp3DEditor);
