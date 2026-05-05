@@ -2,6 +2,8 @@
 #include "libslic3r/DrawPathGCodeGenerator.hpp"
 #include "libslic3r/DrawSession.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include <fstream>
+#include <sstream>
 
 using namespace Slic3r;
 
@@ -367,4 +369,171 @@ TEST_CASE("DrawPathGCodeGenerator: multi-layer smoke test", "[DrawPathGCodeGener
             pos = (line_end != std::string::npos) ? line_end + 1 : std::string::npos;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// DIAGNOSTIC: investigate wipe / retract behavior at segment endpoints
+// ---------------------------------------------------------------------------
+// Helper: split gcode into lines and tag each one.
+struct GCodeLine {
+    std::string raw;
+    bool is_retract  = false;  // G1 E<negative>
+    bool is_unretract= false;  // G1 E<positive, no XY>
+    bool is_extrude  = false;  // G1 XY E<positive>
+    bool is_travel   = false;  // G1 XY, no E
+    bool is_speed    = false;  // G1 F only
+    double e_val     = 0.0;
+};
+
+static std::vector<GCodeLine> parse_gcode_lines(const std::string& gcode)
+{
+    std::vector<GCodeLine> result;
+    std::istringstream ss(gcode);
+    std::string raw;
+    double tracked_e = 0.0;
+    while (std::getline(ss, raw)) {
+        if (raw.empty()) continue;
+        GCodeLine gl;
+        gl.raw = raw;
+        bool is_g1 = (raw.rfind("G1 ", 0) == 0);
+        if (is_g1) {
+            bool has_x = (raw.find(" X") != std::string::npos);
+            bool has_y = (raw.find(" Y") != std::string::npos);
+            bool has_f = (raw.find(" F") != std::string::npos);
+            auto e_pos = raw.find(" E");
+            if (e_pos != std::string::npos) {
+                double e = std::stod(raw.substr(e_pos + 2));
+                gl.e_val = e;
+                double delta = e - tracked_e;
+                tracked_e = e;
+                if (!has_x && !has_y && delta < -1e-6)  gl.is_retract   = true;
+                else if (!has_x && !has_y && delta > 1e-6) gl.is_unretract = true;
+                else if ((has_x || has_y) && delta > 1e-6) gl.is_extrude   = true;
+                else if ((has_x || has_y) && delta < -1e-6) gl.is_retract  = true; // wipe-retract
+            } else if (has_x || has_y) {
+                gl.is_travel = true;
+            } else if (has_f) {
+                gl.is_speed = true;
+            }
+        }
+        result.push_back(gl);
+    }
+    return result;
+}
+
+TEST_CASE("GCode wipe investigation: 3 connected extrusion segments - no retract between them", "[DrawGCodeWipe]")
+{
+    // 3 horizontal segments, all connected end-to-start:
+    //   A(10,10) -> B(20,10) -> C(30,10) -> D(40,10)
+    // After initial positioning travel to A, segments B and C should be pure
+    // extrusion G1 lines — NO retract, NO travel between them.
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.8 }));
+
+    DrawSession session;
+    session.add_layer(0.2);
+    DrawLayer& l = session.layers.back();
+    DrawSegment s0; s0.start = Vec2d(10, 10); s0.end = Vec2d(20, 10); s0.is_travel = false;
+    DrawSegment s1; s1.start = Vec2d(20, 10); s1.end = Vec2d(30, 10); s1.is_travel = false;
+    DrawSegment s2; s2.start = Vec2d(30, 10); s2.end = Vec2d(40, 10); s2.is_travel = false;
+    l.segments.push_back(s0);
+    l.segments.push_back(s1);
+    l.segments.push_back(s2);
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    std::string gcode = gen.generate(session);
+
+    // Write full G-code to a temp file for human inspection.
+    {
+        std::ofstream f("draw_mode_wipe_investigation.gcode");
+        f << gcode;
+    }
+
+    auto lines = parse_gcode_lines(gcode);
+
+    // Build an annotated report (always shown via WARN).
+    std::ostringstream report;
+    report << "\n=== G-CODE LINE ANALYSIS (3 connected extrusion segments) ===\n";
+    int retract_count = 0, unretract_count = 0, extrude_count = 0, travel_count = 0;
+    for (const auto& gl : lines) {
+        std::string tag;
+        if      (gl.is_retract)   { tag = "[RETRACT]  "; ++retract_count; }
+        else if (gl.is_unretract) { tag = "[UNRETRACT]"; ++unretract_count; }
+        else if (gl.is_extrude)   { tag = "[EXTRUDE]  "; ++extrude_count; }
+        else if (gl.is_travel)    { tag = "[TRAVEL]   "; ++travel_count; }
+        else if (gl.is_speed)     { tag = "[SPEED]    "; }
+        else                      { tag = "           "; }
+        report << "  " << tag << "  " << gl.raw << "\n";
+    }
+    report << "\n--- COUNTS ---\n";
+    report << "  Retracts:   " << retract_count   << "\n";
+    report << "  Unretracts: " << unretract_count  << "\n";
+    report << "  Extrudes:   " << extrude_count    << "\n";
+    report << "  Travels:    " << travel_count     << "\n";
+    report << "=== END ===\n";
+    WARN(report.str());
+
+    // ASSERTIONS:
+    // 3 extrusion segments -> exactly 3 extrude G1 lines.
+    REQUIRE(extrude_count == 3);
+
+    // 2 retracts total: 1 before initial positioning travel + 1 postamble retract.
+    // Connected segments must NOT produce any extra retracts between them.
+    INFO("Retract count = " << retract_count << " (expected 2: 1 initial + 1 postamble)");
+    CHECK(retract_count == 2);
+
+    // Only ONE travel move (initial positioning to A).
+    INFO("Travel count = " << travel_count << " (expected 1 — only for initial travel to first segment)");
+    CHECK(travel_count == 1);
+}
+
+TEST_CASE("GCode wipe investigation: disconnected segments - retract BETWEEN each", "[DrawGCodeWipe]")
+{
+    // 3 disconnected segments (gaps between them).
+    // Each gap should produce: retract -> travel -> unretract.
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.8 }));
+
+    DrawSession session;
+    session.add_layer(0.2);
+    DrawLayer& l = session.layers.back();
+    // Gap of 5mm between each segment.
+    DrawSegment s0; s0.start = Vec2d(10, 10); s0.end = Vec2d(20, 10); s0.is_travel = false;
+    DrawSegment s1; s1.start = Vec2d(25, 10); s1.end = Vec2d(35, 10); s1.is_travel = false; // disconnected
+    DrawSegment s2; s2.start = Vec2d(40, 10); s2.end = Vec2d(50, 10); s2.is_travel = false; // disconnected
+    l.segments.push_back(s0);
+    l.segments.push_back(s1);
+    l.segments.push_back(s2);
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    std::string gcode = gen.generate(session);
+
+    auto lines = parse_gcode_lines(gcode);
+
+    int retract_count = 0, unretract_count = 0, extrude_count = 0, travel_count = 0;
+    std::ostringstream report;
+    report << "\n=== G-CODE LINE ANALYSIS (3 DISCONNECTED segments) ===\n";
+    for (const auto& gl : lines) {
+        std::string tag;
+        if      (gl.is_retract)   { tag = "[RETRACT]  "; ++retract_count; }
+        else if (gl.is_unretract) { tag = "[UNRETRACT]"; ++unretract_count; }
+        else if (gl.is_extrude)   { tag = "[EXTRUDE]  "; ++extrude_count; }
+        else if (gl.is_travel)    { tag = "[TRAVEL]   "; ++travel_count; }
+        else if (gl.is_speed)     { tag = "[SPEED]    "; }
+        else                      { tag = "           "; }
+        report << "  " << tag << "  " << gl.raw << "\n";
+    }
+    report << "\n--- COUNTS ---\n"
+           << "  Retracts:   " << retract_count   << "\n"
+           << "  Unretracts: " << unretract_count  << "\n"
+           << "  Extrudes:   " << extrude_count    << "\n"
+           << "  Travels:    " << travel_count     << "\n"
+           << "=== END ===\n";
+    WARN(report.str());
+
+    // 3 disconnected segments -> 3 retracts before each positioning travel
+    // + 1 postamble retract = 4 total.
+    REQUIRE(extrude_count == 3);
+    CHECK(retract_count == 4);
+    CHECK(travel_count  == 3);
 }

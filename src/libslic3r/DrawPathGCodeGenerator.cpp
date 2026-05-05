@@ -122,9 +122,10 @@ std::string DrawPathGCodeGenerator::generate_preamble(const DrawSession& session
     if (fan_min > 0.0)
         out += m_writer.set_fan(static_cast<unsigned int>(fan_min));
 
-    // Move to a safe Z before beginning the first layer.
+    // Move to the first layer's print height (z_end) before beginning.
+    // z_start of layer 0 is 0.0 (the bed surface); printing must happen at z_end.
     if (!session.layers.empty()) {
-        out += m_writer.travel_to_z(session.layers.front().z_start, "initial Z");
+        out += m_writer.travel_to_z(session.layers.front().z_end, "initial Z");
     }
 
     return out;
@@ -158,46 +159,44 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
     if (speed_mmmin > 0.0)
         out += m_writer.set_speed(speed_mmmin, "draw layer speed");
 
-    // Continuous Z distribution across all non-travel segments in this layer.
-    int non_travel_count = 0;
-    for (const DrawSegment& seg : layer.segments)
-        if (!seg.is_travel) ++non_travel_count;
-
-    const double z_per_seg = (non_travel_count > 0)
-        ? (layer.z_end - layer.z_start) / static_cast<double>(non_travel_count)
-        : 0.0;
-
-    double current_z = layer.z_start;
+    // All segments in this layer print at the same Z = layer.z_end.
+    // z_start is the bottom of the layer (previous layer top / bed surface);
+    // z_end is where the nozzle tip must sit while depositing material.
+    // Ramping Z within a layer causes the nozzle to print at incorrect heights
+    // (starting at bed level for the first layer) which creates visible bulges
+    // and artifacts at segment junctions.
+    const double layer_z = layer.z_end;
 
     for (const DrawSegment& seg : layer.segments) {
         const Vec2d abs_start = seg.start + abs_offset;
         const Vec2d abs_end   = seg.end   + abs_offset;
 
-        // Verify head is at abs_start; if not, emit a positioning travel first.
+        // Verify head is at abs_start AND at the correct layer Z.
+        // A Z-only mismatch (layer transition at same XY) still requires
+        // a retract → Z-travel → unretract sequence.
         const Vec3d& cur = m_writer.get_position();
         const bool need_reposition =
             std::abs(cur.x() - abs_start.x()) > 0.001 ||
-            std::abs(cur.y() - abs_start.y()) > 0.001;
+            std::abs(cur.y() - abs_start.y()) > 0.001 ||
+            std::abs(cur.z() - layer_z)       > 0.001;
 
         if (seg.is_travel) {
             // For travel segments: retract once, optionally visit abs_start, then go to abs_end.
             out += m_writer.retract();
             if (need_reposition)
-                out += m_writer.travel_to_xyz(Vec3d(abs_start.x(), abs_start.y(), current_z), "to travel-src");
-            out += m_writer.travel_to_xyz(Vec3d(abs_end.x(), abs_end.y(), current_z), "travel");
+                out += m_writer.travel_to_xyz(Vec3d(abs_start.x(), abs_start.y(), layer_z), "to travel-src");
+            out += m_writer.travel_to_xyz(Vec3d(abs_end.x(), abs_end.y(), layer_z), "travel");
             out += m_writer.unretract();
         } else {
             // For extrusion segments: position head at abs_start if needed, then extrude to abs_end.
             if (need_reposition) {
                 out += m_writer.retract();
-                out += m_writer.travel_to_xyz(Vec3d(abs_start.x(), abs_start.y(), current_z), "to seg start");
+                out += m_writer.travel_to_xyz(Vec3d(abs_start.x(), abs_start.y(), layer_z), "to seg start");
                 out += m_writer.unretract();
             }
-            const double target_z = current_z + z_per_seg;
             const double dE = calc_extrusion(seg.length());
             out += m_writer.extrude_to_xyz(
-                Vec3d(abs_end.x(), abs_end.y(), target_z), dE, "draw extrude");
-            current_z = target_z;
+                Vec3d(abs_end.x(), abs_end.y(), layer_z), dE, "draw extrude");
         }
     }
 
