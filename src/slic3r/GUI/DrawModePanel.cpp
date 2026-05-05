@@ -43,6 +43,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
 
     // Action buttons
     m_clear_btn    = new wxButton(this, wxID_ANY, "Clear Layer");
+    m_simulate_btn = new wxButton(this, wxID_ANY, "Simulate");
     m_finalize_btn = new wxButton(this, wxID_ANY, "Finalize");
 
     // Interactive 2-D drawing canvas
@@ -59,6 +60,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     top_sizer->Add(m_edit_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->AddStretchSpacer();
     top_sizer->Add(m_clear_btn,    0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_simulate_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_finalize_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
 
     auto* nav_sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -81,6 +83,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_next_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_next_layer, this);
     m_add_layer_btn->Bind(wxEVT_BUTTON,  &DrawModePanel::on_add_layer,  this);
     m_clear_btn->Bind(wxEVT_BUTTON,      &DrawModePanel::on_clear_layer, this);
+    m_simulate_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_simulate,    this);
     m_finalize_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_finalize,    this);
     Bind(wxEVT_CHAR_HOOK,                &DrawModePanel::on_char_hook,   this);
 
@@ -451,15 +454,15 @@ static TriangleMesh make_draw_path_mesh(const DrawSession& session, double nozzl
     return TriangleMesh(verts, faces);
 }
 
-void DrawModePanel::on_finalize(wxCommandEvent&)
+bool DrawModePanel::apply_session_to_model()
 {
     if (m_session.is_empty()) {
         wxMessageBox("Nothing to finalize — draw some segments first.", "Draw Mode",
             wxOK | wxICON_INFORMATION, this);
-        return;
+        return false;
     }
 
-    if (!m_plater) return;
+    if (!m_plater) return false;
 
     // Read nozzle diameter from active printer preset
     double nozzle_d = 0.4;
@@ -474,7 +477,7 @@ void DrawModePanel::on_finalize(wxCommandEvent&)
     if (path_mesh.empty()) {
         wxMessageBox("No drawable segments found.", "Draw Mode",
             wxOK | wxICON_INFORMATION, this);
-        return;
+        return false;
     }
 
     Model& model = m_plater->model();
@@ -512,7 +515,7 @@ void DrawModePanel::on_finalize(wxCommandEvent&)
                     "Please move existing objects to a different plate first,\n"
                     "or use a fresh plate for your drawing.",
                     "Draw Mode", wxOK | wxICON_WARNING, this);
-                return;
+                return false;
             }
         }
 
@@ -539,7 +542,26 @@ void DrawModePanel::on_finalize(wxCommandEvent&)
     update_banner();
     update_layer_label();
 
-    // Switch back to 3D Editor tab
+    return true;
+}
+
+void DrawModePanel::on_simulate(wxCommandEvent&)
+{
+    if (!apply_session_to_model()) return;
+
+    // Trigger the slicing pipeline — BackgroundSlicingProcess will detect
+    // the all-draw-path plate and call DrawPathGCodeGenerator directly.
+    m_plater->reslice();
+
+    // Switch to Preview tab so the G-code viewer shows the result.
+    wxGetApp().mainframe->select_tab((size_t)MainFrame::tpPreview);
+}
+
+void DrawModePanel::on_finalize(wxCommandEvent&)
+{
+    if (!apply_session_to_model()) return;
+
+    // Switch back to 3D Editor tab.
     wxGetApp().mainframe->select_tab((size_t)MainFrame::tp3DEditor);
 }
 

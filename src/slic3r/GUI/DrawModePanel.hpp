@@ -59,6 +59,7 @@ private:
     wxButton*          m_next_layer_btn { nullptr };
     wxButton*          m_add_layer_btn  { nullptr };
     wxButton*          m_clear_btn      { nullptr };
+    wxButton*          m_simulate_btn   { nullptr };
     wxButton*          m_finalize_btn   { nullptr };
 
     // State
@@ -104,10 +105,15 @@ private:
     void on_next_layer(wxCommandEvent& evt);
     void on_add_layer(wxCommandEvent& evt);
     void on_clear_layer(wxCommandEvent& evt);
+    void on_simulate(wxCommandEvent& evt);
     void on_finalize(wxCommandEvent& evt);
 
     // Keyboard hook (Ctrl+Z / Ctrl+Y)
     void on_char_hook(wxKeyEvent& evt);
+
+    // Shared finalize logic: create/update the ModelObject on the plate.
+    // Returns true on success. Does NOT switch tabs.
+    bool apply_session_to_model();
 };
 
 } // namespace GUI
