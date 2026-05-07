@@ -54,7 +54,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_length_input->SetHint("Length mm");
 
     // Action buttons
-    m_snip_btn     = new wxButton(this, wxID_ANY, "✂ Snip");
+    m_snip_btn     = new wxButton(this, wxID_ANY, "Snip");
     m_clear_btn    = new wxButton(this, wxID_ANY, "Clear Layer");
     m_simulate_btn = new wxButton(this, wxID_ANY, "Simulate");
     m_finalize_btn = new wxButton(this, wxID_ANY, "Finalize");
