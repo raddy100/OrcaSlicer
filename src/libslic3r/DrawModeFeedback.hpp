@@ -24,6 +24,10 @@ struct DrawModeDisplayPreferences {
 constexpr double DRAW_MODE_MIN_SEGMENT_LENGTH_MM = 1e-6;
 constexpr double DRAW_MODE_NUDGE_SMALL_MM        = 0.1;
 constexpr double DRAW_MODE_NUDGE_LARGE_MM        = 1.0;
+constexpr double DRAW_MODE_DEFAULT_ZOOM_FACTOR   = 1.0;
+constexpr double DRAW_MODE_MIN_ZOOM_FACTOR       = 0.5;
+constexpr double DRAW_MODE_MAX_ZOOM_FACTOR       = 10.0;
+constexpr double DRAW_MODE_SCALE_GRID_MM         = 10.0;
 
 double draw_segment_length_mm(const Vec2d& start, const Vec2d& end);
 double draw_segment_absolute_angle_degrees(const Vec2d& start, const Vec2d& end);
@@ -43,6 +47,10 @@ std::string draw_format_coordinate_mm(const Vec2d& pt);
 
 Vec2d draw_nudge_delta_from_key(int key_code, bool shift_down);
 DrawSegment draw_translate_segment(const DrawSegment& segment, const Vec2d& delta);
+
+double draw_clamp_zoom_factor(double zoom_factor);
+Vec2d draw_clamp_pan_offset(const Vec2d& pan_offset, double plate_width_mm, double plate_height_mm, double zoom_factor);
+int draw_scale_bar_length_pixels(double grid_spacing_mm, double plate_width_mm, double zoom_factor, double inner_canvas_width_px);
 
 bool draw_parse_bool_preference(const std::string& value, bool default_value);
 std::string draw_format_bool_preference(bool value);

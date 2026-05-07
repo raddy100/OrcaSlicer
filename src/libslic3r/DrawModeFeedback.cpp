@@ -187,6 +187,47 @@ DrawSegment draw_translate_segment(const DrawSegment& segment, const Vec2d& delt
     return translated;
 }
 
+double draw_clamp_zoom_factor(double zoom_factor)
+{
+    if (!std::isfinite(zoom_factor))
+        return DRAW_MODE_DEFAULT_ZOOM_FACTOR;
+    return std::clamp(zoom_factor, DRAW_MODE_MIN_ZOOM_FACTOR, DRAW_MODE_MAX_ZOOM_FACTOR);
+}
+
+Vec2d draw_clamp_pan_offset(const Vec2d& pan_offset, double plate_width_mm, double plate_height_mm, double zoom_factor)
+{
+    const double zoom = draw_clamp_zoom_factor(zoom_factor);
+    if (!std::isfinite(plate_width_mm) || plate_width_mm <= 0.0
+            || !std::isfinite(plate_height_mm) || plate_height_mm <= 0.0)
+        return Vec2d(0.0, 0.0);
+
+    const double visible_w = plate_width_mm / zoom;
+    const double visible_h = plate_height_mm / zoom;
+
+    const auto clamp_axis = [](double requested, double plate_mm, double visible_mm) {
+        if (!std::isfinite(requested))
+            requested = 0.0;
+        if (visible_mm >= plate_mm)
+            return (plate_mm - visible_mm) * 0.5;
+        return std::clamp(requested, 0.0, plate_mm - visible_mm);
+    };
+
+    return Vec2d(clamp_axis(pan_offset.x(), plate_width_mm, visible_w),
+                 clamp_axis(pan_offset.y(), plate_height_mm, visible_h));
+}
+
+int draw_scale_bar_length_pixels(double grid_spacing_mm, double plate_width_mm, double zoom_factor, double inner_canvas_width_px)
+{
+    if (!std::isfinite(grid_spacing_mm) || grid_spacing_mm <= 0.0
+            || !std::isfinite(plate_width_mm) || plate_width_mm <= 0.0
+            || !std::isfinite(inner_canvas_width_px) || inner_canvas_width_px <= 0.0)
+        return 0;
+
+    const double zoom = draw_clamp_zoom_factor(zoom_factor);
+    const double pixels_per_mm = inner_canvas_width_px * zoom / plate_width_mm;
+    return std::max(1, static_cast<int>(std::round(grid_spacing_mm * pixels_per_mm)));
+}
+
 bool draw_parse_bool_preference(const std::string& value, bool default_value)
 {
     if (value == "1" || value == "true" || value == "True" || value == "TRUE")

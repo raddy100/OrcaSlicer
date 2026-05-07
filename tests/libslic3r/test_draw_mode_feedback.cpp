@@ -9,6 +9,7 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 
 #include <boost/filesystem/operations.hpp>
+#include <limits>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -144,4 +145,51 @@ TEST_CASE("Draw3mf: round-trip preserves draw mode display preferences", "[Draw3
     REQUIRE(dst_model.draw_mode_display_preferences.show_coordinates);
     REQUIRE(dst_model.objects.size() == 1);
     REQUIRE(dst_model.objects.front()->draw_session != nullptr);
+}
+
+TEST_CASE("DrawModeFeedback: zoom factor clamping for 2-20 mm work", "[DrawModeFeedback]")
+{
+    REQUIRE_THAT(DRAW_MODE_DEFAULT_ZOOM_FACTOR, WithinAbs(1.0, 1e-9));
+    REQUIRE_THAT(DRAW_MODE_MIN_ZOOM_FACTOR, WithinAbs(0.5, 1e-9));
+    REQUIRE_THAT(DRAW_MODE_MAX_ZOOM_FACTOR, WithinAbs(10.0, 1e-9));
+
+    REQUIRE_THAT(draw_clamp_zoom_factor(0.1), WithinAbs(DRAW_MODE_MIN_ZOOM_FACTOR, 1e-9));
+    REQUIRE_THAT(draw_clamp_zoom_factor(DRAW_MODE_DEFAULT_ZOOM_FACTOR), WithinAbs(1.0, 1e-9));
+    REQUIRE_THAT(draw_clamp_zoom_factor(5.0), WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(draw_clamp_zoom_factor(15.0), WithinAbs(DRAW_MODE_MAX_ZOOM_FACTOR, 1e-9));
+    REQUIRE_THAT(draw_clamp_zoom_factor(std::numeric_limits<double>::infinity()), WithinAbs(DRAW_MODE_DEFAULT_ZOOM_FACTOR, 1e-9));
+}
+
+TEST_CASE("DrawModeFeedback: scale indicator shows 10 mm default grid spacing", "[DrawModeFeedback]")
+{
+    REQUIRE_THAT(DRAW_MODE_SCALE_GRID_MM, WithinAbs(10.0, 1e-9));
+
+    constexpr double plate_w = 256.0;
+    constexpr double canvas_inner = 512.0;
+
+    // At zoom=1.0, 256mm plate with 512px canvas inner width:
+    // 10mm should be 10/256 * 512 = 20 pixels.
+    REQUIRE(draw_scale_bar_length_pixels(DRAW_MODE_SCALE_GRID_MM, plate_w, 1.0, canvas_inner) == 20);
+
+    // At zoom=2.0, visible width is 128mm:
+    // 10mm should be 10/128 * 512 = 40 pixels.
+    REQUIRE(draw_scale_bar_length_pixels(DRAW_MODE_SCALE_GRID_MM, plate_w, 2.0, canvas_inner) == 40);
+    REQUIRE(draw_scale_bar_length_pixels(DRAW_MODE_SCALE_GRID_MM, plate_w, 0.5, canvas_inner) == 10);
+    REQUIRE(draw_scale_bar_length_pixels(DRAW_MODE_SCALE_GRID_MM, plate_w, 10.0, canvas_inner) == 200);
+    REQUIRE(draw_scale_bar_length_pixels(DRAW_MODE_SCALE_GRID_MM, plate_w, 1.0, 0.0) == 0);
+}
+
+TEST_CASE("DrawModeFeedback: pan bounds keep zoomed plate reachable", "[DrawModeFeedback]")
+{
+    const Vec2d centered_zoomed_out = draw_clamp_pan_offset(Vec2d(20.0, 20.0), 256.0, 256.0, 0.5);
+    REQUIRE_THAT(centered_zoomed_out.x(), WithinAbs(-128.0, 1e-9));
+    REQUIRE_THAT(centered_zoomed_out.y(), WithinAbs(-128.0, 1e-9));
+
+    const Vec2d upper_left = draw_clamp_pan_offset(Vec2d(-10.0, -10.0), 256.0, 256.0, 2.0);
+    REQUIRE_THAT(upper_left.x(), WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(upper_left.y(), WithinAbs(0.0, 1e-9));
+
+    const Vec2d lower_right = draw_clamp_pan_offset(Vec2d(300.0, 300.0), 256.0, 256.0, 2.0);
+    REQUIRE_THAT(lower_right.x(), WithinAbs(128.0, 1e-9));
+    REQUIRE_THAT(lower_right.y(), WithinAbs(128.0, 1e-9));
 }

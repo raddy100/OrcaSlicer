@@ -124,10 +124,15 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_canvas->Bind(wxEVT_LEFT_UP,     &DrawModePanel::on_canvas_left_up,   this);
     m_canvas->Bind(wxEVT_RIGHT_DOWN,  &DrawModePanel::on_canvas_right_down, this);
     m_canvas->Bind(wxEVT_MOTION,      &DrawModePanel::on_canvas_motion,     this);
+    m_canvas->Bind(wxEVT_MOUSEWHEEL,  &DrawModePanel::on_canvas_mouse_wheel, this);
+    m_canvas->Bind(wxEVT_MIDDLE_DOWN, &DrawModePanel::on_canvas_middle_down, this);
+    m_canvas->Bind(wxEVT_MIDDLE_UP,   &DrawModePanel::on_canvas_middle_up,   this);
     m_canvas->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent&) {
         // Capture lost externally — clean up drag state without calling ReleaseMouse
         m_is_dragging = false;
         m_dragging_ep.reset();
+        m_pan_start.reset();
+        m_canvas->SetCursor(wxCursor(wxCURSOR_CROSS));
         if (m_canvas) m_canvas->Refresh(false);
     });
 }
@@ -142,6 +147,9 @@ void DrawModePanel::activate(PartPlate* plate)
     m_redo_stack.clear();
     m_pending_start.reset();
     reset_draft(false);
+    m_zoom_factor = DRAW_MODE_DEFAULT_ZOOM_FACTOR;
+    m_pan_offset = Vec2d(0.0, 0.0);
+    m_pan_start.reset();
 
     if (m_plater) {
         const DrawModeDisplayPreferences& prefs = m_plater->model().draw_mode_display_preferences;
@@ -189,6 +197,9 @@ void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
     m_redo_stack.clear();
     m_pending_start.reset();
     reset_draft(false);
+    m_zoom_factor = DRAW_MODE_DEFAULT_ZOOM_FACTOR;
+    m_pan_offset = Vec2d(0.0, 0.0);
+    m_pan_start.reset();
 
     if (m_plater) {
         const DrawModeDisplayPreferences& prefs = m_plater->model().draw_mode_display_preferences;
@@ -251,6 +262,39 @@ void DrawModePanel::dispatch_command(std::unique_ptr<DrawCommand> cmd)
 namespace {
     constexpr int CANVAS_PAD = 14; // pixel margin inside canvas widget
 
+    void draw_scale_indicator(wxDC& dc, const wxSize& canvas_size, double plate_width_mm, double zoom_factor)
+    {
+        const double inner_w = std::max(1.0, static_cast<double>(canvas_size.x - 2 * CANVAS_PAD));
+        const int bar_length_px = draw_scale_bar_length_pixels(
+            DRAW_MODE_SCALE_GRID_MM, plate_width_mm, zoom_factor, inner_w);
+        if (bar_length_px <= 0)
+            return;
+
+        const wxString scale_label = wxString::Format("%.0f mm", DRAW_MODE_SCALE_GRID_MM);
+        dc.SetFont(wxFont(8, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL));
+        const wxSize label_sz = dc.GetTextExtent(scale_label);
+
+        const int pad = 5;
+        const int box_w = std::max(bar_length_px, label_sz.x) + 2 * pad;
+        const int box_h = label_sz.y + 18 + 2 * pad;
+        const int box_x = std::max(CANVAS_PAD, canvas_size.x - CANVAS_PAD - box_w);
+        const int box_y = std::max(CANVAS_PAD, canvas_size.y - CANVAS_PAD - box_h);
+        const int bar_x = box_x + (box_w - bar_length_px) / 2;
+        const int bar_y = box_y + box_h - pad - 8;
+
+        dc.SetPen(wxPen(wxColour(20, 20, 20), 1));
+        dc.SetBrush(wxBrush(wxColour(45, 45, 45, 220)));
+        dc.DrawRoundedRectangle(box_x, box_y, box_w, box_h, 3);
+
+        dc.SetPen(wxPen(wxColour(220, 220, 220), 2));
+        dc.DrawLine(bar_x, bar_y, bar_x + bar_length_px, bar_y);
+        dc.DrawLine(bar_x, bar_y - 4, bar_x, bar_y + 4);
+        dc.DrawLine(bar_x + bar_length_px, bar_y - 4, bar_x + bar_length_px, bar_y + 4);
+
+        dc.SetTextForeground(wxColour(220, 220, 220));
+        dc.DrawText(scale_label, box_x + (box_w - label_sz.x) / 2, box_y + pad);
+    }
+
     void draw_feedback_label(wxDC& dc, const wxString& text, wxPoint pos, const wxSize& canvas_size)
     {
         constexpr int pad = 4;
@@ -273,8 +317,17 @@ Vec2d DrawModePanel::screen_to_plate(wxPoint pt) const
     double inner_w = sz.x - 2 * CANVAS_PAD;
     double inner_h = sz.y - 2 * CANVAS_PAD;
     if (inner_w <= 0 || inner_h <= 0) return Vec2d(0.0, 0.0);
-    double px = (pt.x - CANVAS_PAD) / inner_w * m_plate_w_mm;
-    double py = (1.0 - (pt.y - CANVAS_PAD) / inner_h) * m_plate_h_mm;
+    
+    // Apply zoom and pan: screen -> normalized [0,1] -> plate-mm with zoom/pan
+    double norm_x = (pt.x - CANVAS_PAD) / inner_w;
+    double norm_y = 1.0 - (pt.y - CANVAS_PAD) / inner_h;
+    
+    // Zoom transforms the visible plate area
+    double visible_w = m_plate_w_mm / m_zoom_factor;
+    double visible_h = m_plate_h_mm / m_zoom_factor;
+    
+    double px = norm_x * visible_w + m_pan_offset.x();
+    double py = norm_y * visible_h + m_pan_offset.y();
     return Vec2d(px, py);
 }
 
@@ -284,8 +337,16 @@ wxPoint DrawModePanel::plate_to_screen(Vec2d pt) const
     wxSize sz = m_canvas->GetClientSize();
     double inner_w = sz.x - 2 * CANVAS_PAD;
     double inner_h = sz.y - 2 * CANVAS_PAD;
-    int sx = CANVAS_PAD + static_cast<int>(pt.x() / m_plate_w_mm * inner_w);
-    int sy = CANVAS_PAD + static_cast<int>((1.0 - pt.y() / m_plate_h_mm) * inner_h);
+    
+    // Apply zoom and pan: plate-mm -> normalized [0,1] with zoom/pan -> screen
+    double visible_w = m_plate_w_mm / m_zoom_factor;
+    double visible_h = m_plate_h_mm / m_zoom_factor;
+    
+    double norm_x = (pt.x() - m_pan_offset.x()) / visible_w;
+    double norm_y = (pt.y() - m_pan_offset.y()) / visible_h;
+    
+    int sx = CANVAS_PAD + static_cast<int>(norm_x * inner_w);
+    int sy = CANVAS_PAD + static_cast<int>((1.0 - norm_y) * inner_h);
     return wxPoint(sx, sy);
 }
 
@@ -432,6 +493,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         wxString msg = "No layers — click '+ Layer' to start";
         wxSize ts = dc.GetTextExtent(msg);
         dc.DrawText(msg, (sz.x - ts.x) / 2, (sz.y - ts.y) / 2);
+        draw_scale_indicator(dc, sz, m_plate_w_mm, m_zoom_factor);
         return;
     }
 
@@ -577,6 +639,8 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
 
     if (m_show_coordinates)
         draw_feedback_label(dc, wxString::FromUTF8(draw_format_coordinate_mm(m_mouse_plate)), wxPoint(pm.x + 10, pm.y + 10), sz);
+
+    draw_scale_indicator(dc, sz, m_plate_w_mm, m_zoom_factor);
 }
 
 // ---------------------------------------------------------------------------
@@ -593,10 +657,10 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
         if (active < 0 || active >= m_session.layer_count()) return;
         const DrawLayer& layer = m_session.layers[active];
 
-        // Threshold: ~8 screen pixels converted to plate-space mm
+        // Threshold: ~8 screen pixels converted to plate-space mm at the current zoom.
         wxSize sz = m_canvas->GetClientSize();
         double inner_w = std::max(1.0, (double)(sz.x - 2 * CANVAS_PAD));
-        double thr = 8.0 / (inner_w / m_plate_w_mm);
+        double thr = 8.0 / (inner_w / (m_plate_w_mm / m_zoom_factor));
 
         // Priority 1: endpoints
         int ep_seg = -1; bool ep_is_start = false; double best_ep = thr;
@@ -694,6 +758,29 @@ void DrawModePanel::on_canvas_motion(wxMouseEvent& evt)
 {
     const Vec2d raw_mouse = screen_to_plate(evt.GetPosition());
     m_mouse_plate = snap_pos(raw_mouse);
+    
+    // Handle middle-mouse pan dragging
+    if (m_pan_start.has_value()) {
+        wxPoint current_pos = evt.GetPosition();
+        wxSize sz = m_canvas->GetClientSize();
+        double inner_w = std::max(1.0, static_cast<double>(sz.x - 2 * CANVAS_PAD));
+        double inner_h = std::max(1.0, static_cast<double>(sz.y - 2 * CANVAS_PAD));
+        
+        double visible_w = m_plate_w_mm / m_zoom_factor;
+        double visible_h = m_plate_h_mm / m_zoom_factor;
+        
+        int dx = current_pos.x - m_pan_start->x;
+        int dy = current_pos.y - m_pan_start->y;
+        
+        m_pan_offset.x() = m_pan_start_offset.x() - (dx / inner_w) * visible_w;
+        m_pan_offset.y() = m_pan_start_offset.y() + (dy / inner_h) * visible_h;
+        
+        m_pan_offset = draw_clamp_pan_offset(m_pan_offset, m_plate_w_mm, m_plate_h_mm, m_zoom_factor);
+        
+        if (m_canvas) m_canvas->Refresh(false);
+        return;
+    }
+    
     if (m_is_dragging && m_dragging_ep.has_value()) {
         const EndpointRef& ep = *m_dragging_ep;
         if (ep.layer_index >= 0 && ep.layer_index < m_session.layer_count()
@@ -706,6 +793,48 @@ void DrawModePanel::on_canvas_motion(wxMouseEvent& evt)
         update_draft(raw_mouse, evt.ControlDown(), evt.AltDown());
     }
     if (m_canvas) m_canvas->Refresh(false);
+    evt.Skip();
+}
+
+void DrawModePanel::on_canvas_mouse_wheel(wxMouseEvent& evt)
+{
+    // Zoom centered on mouse position
+    const int rotation = evt.GetWheelRotation();
+    const double zoom_step = (rotation > 0) ? 1.2 : (1.0 / 1.2);
+    
+    // Get mouse position in plate coordinates before zoom
+    const Vec2d mouse_plate_before = screen_to_plate(evt.GetPosition());
+    
+    // Update zoom with sensible bounds for 2-20 mm work.
+    const double old_zoom = m_zoom_factor;
+    m_zoom_factor = draw_clamp_zoom_factor(m_zoom_factor * zoom_step);
+    
+    // Adjust pan to keep mouse position stable
+    if (std::abs(m_zoom_factor - old_zoom) > 1e-6) {
+        const Vec2d mouse_plate_after = screen_to_plate(evt.GetPosition());
+        m_pan_offset += (mouse_plate_before - mouse_plate_after);
+        
+        m_pan_offset = draw_clamp_pan_offset(m_pan_offset, m_plate_w_mm, m_plate_h_mm, m_zoom_factor);
+    }
+    
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_canvas_middle_down(wxMouseEvent& evt)
+{
+    m_pan_start = evt.GetPosition();
+    m_pan_start_offset = m_pan_offset;
+    if (!m_canvas->HasCapture())
+        m_canvas->CaptureMouse();
+    m_canvas->SetCursor(wxCursor(wxCURSOR_HAND));
+}
+
+void DrawModePanel::on_canvas_middle_up(wxMouseEvent& evt)
+{
+    m_pan_start.reset();
+    if (m_canvas->HasCapture())
+        m_canvas->ReleaseMouse();
+    m_canvas->SetCursor(wxCursor(wxCURSOR_CROSS));
     evt.Skip();
 }
 

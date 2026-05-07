@@ -86,6 +86,12 @@ private:
     double               m_plate_w_mm  { 256.0 };
     double               m_plate_h_mm  { 256.0 };
 
+    // Zoom and pan state
+    double               m_zoom_factor { DRAW_MODE_DEFAULT_ZOOM_FACTOR }; // 1.0 = fit plate, >1.0 = zoomed in
+    Vec2d                m_pan_offset  { 0.0, 0.0 }; // pan offset in plate-mm
+    std::optional<wxPoint> m_pan_start;              // middle-drag start position
+    Vec2d                m_pan_start_offset { 0.0, 0.0 };
+
     // Cached nozzle diameter (read from printer preset in activate())
     double               m_nozzle_d    { 0.4 };
     // Filled-quad width preview toggle
@@ -146,6 +152,9 @@ private:
     void on_canvas_right_down(wxMouseEvent&);
     void on_canvas_motion(wxMouseEvent&);
     void on_canvas_left_up(wxMouseEvent&);
+    void on_canvas_mouse_wheel(wxMouseEvent&);
+    void on_canvas_middle_down(wxMouseEvent&);
+    void on_canvas_middle_up(wxMouseEvent&);
 
     // Button handlers
     void on_draw_toggle(wxCommandEvent& evt);
