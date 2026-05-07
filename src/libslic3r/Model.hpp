@@ -20,6 +20,7 @@
 #include "EmbossShape.hpp"
 #include "TriangleSelector.hpp"
 #include "DrawSession.hpp"
+#include "DrawModeFeedback.hpp"
 
 //BBS: add bbs 3mf
 #include "Format/bbs_3mf.hpp"
@@ -1545,6 +1546,7 @@ public:
     std::shared_ptr<ModelDesignInfo> design_info = nullptr;
     std::shared_ptr<ModelInfo> model_info = nullptr;
     std::shared_ptr<ModelProfileInfo> profile_info = nullptr;
+    DrawModeDisplayPreferences draw_mode_display_preferences;
 
     //makerlab information
     std::string mk_name;

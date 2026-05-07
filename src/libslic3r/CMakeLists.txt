@@ -107,6 +107,8 @@ set(lisbslic3r_sources
     CutUtils.hpp
     DrawSession.cpp
     DrawSession.hpp
+    DrawModeFeedback.cpp
+    DrawModeFeedback.hpp
     DrawPathGCodeGenerator.cpp
     DrawPathGCodeGenerator.hpp
     EdgeGrid.cpp

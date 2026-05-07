@@ -99,6 +99,7 @@ Model& Model::assign_copy(const Model &rhs)
     this->stl_design_id = rhs.stl_design_id;
     this->stl_design_country = rhs.stl_design_country;
     this->profile_info = rhs.profile_info;
+    this->draw_mode_display_preferences = rhs.draw_mode_display_preferences;
 
     this->mk_name = rhs.mk_name;
     this->mk_version = rhs.mk_version;
@@ -148,6 +149,7 @@ Model& Model::assign_copy(Model &&rhs)
     rhs.model_info.reset();
     this->profile_info = rhs.profile_info;
     rhs.profile_info.reset();
+    this->draw_mode_display_preferences = rhs.draw_mode_display_preferences;
     return *this;
 }
 

@@ -81,6 +81,24 @@ void MoveEndpointCommand::undo(DrawSession& session)
 }
 
 // ---------------------------------------------------------------------------
+// TranslateSegmentCommand
+// ---------------------------------------------------------------------------
+
+void TranslateSegmentCommand::execute(DrawSession& session)
+{
+    DrawSegment& seg = get_segment(session, layer_index, segment_index);
+    seg.start += delta;
+    seg.end   += delta;
+}
+
+void TranslateSegmentCommand::undo(DrawSession& session)
+{
+    DrawSegment& seg = get_segment(session, layer_index, segment_index);
+    seg.start -= delta;
+    seg.end   -= delta;
+}
+
+// ---------------------------------------------------------------------------
 // AddLayerCommand
 // ---------------------------------------------------------------------------
 

@@ -5,6 +5,7 @@
 #include "MainFrame.hpp"
 #include "GUI_ObjectList.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/DrawModeFeedback.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Config.hpp"
@@ -13,6 +14,7 @@
 #include <wx/stattext.h>
 #include <wx/button.h>
 #include <wx/tglbtn.h>
+#include <wx/textctrl.h>
 #include <wx/msgdlg.h>
 #include <wx/dcbuffer.h>
 
@@ -42,8 +44,14 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_edit_toggle = new wxToggleButton(this, wxID_ANY, "Edit");
     m_fill_toggle = new wxToggleButton(this, wxID_ANY, "Fill Width");
     m_snap_toggle = new wxToggleButton(this, wxID_ANY, "Snap");
+    m_measure_toggle = new wxToggleButton(this, wxID_ANY, "Show Measurements");
+    m_coord_toggle = new wxToggleButton(this, wxID_ANY, "Show Coordinates");
+    m_length_input = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(90, -1), wxTE_PROCESS_ENTER);
     m_draw_toggle->SetValue(true);
     m_snap_toggle->SetValue(true); // snap on by default
+    m_measure_toggle->SetValue(true);
+    m_coord_toggle->SetValue(true);
+    m_length_input->SetHint("Length mm");
 
     // Action buttons
     m_snip_btn     = new wxButton(this, wxID_ANY, "✂ Snip");
@@ -68,6 +76,10 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     top_sizer->Add(m_edit_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_fill_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_snap_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_measure_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_coord_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(new wxStaticText(this, wxID_ANY, "Length:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_length_input, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_snip_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->AddStretchSpacer();
     top_sizer->Add(m_clear_btn,    0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
@@ -92,6 +104,10 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_edit_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_edit_toggle, this);
     m_fill_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_fill_toggle, this);
     m_snap_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_snap_toggle, this);
+    m_measure_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_measure_toggle, this);
+    m_coord_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_coord_toggle, this);
+    m_length_input->Bind(wxEVT_TEXT, &DrawModePanel::on_length_text, this);
+    m_length_input->Bind(wxEVT_TEXT_ENTER, &DrawModePanel::on_length_enter, this);
     m_snip_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_snip, this);
     m_prev_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_prev_layer, this);
     m_next_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_next_layer, this);
@@ -125,6 +141,15 @@ void DrawModePanel::activate(PartPlate* plate)
     m_undo_stack.clear();
     m_redo_stack.clear();
     m_pending_start.reset();
+    reset_draft(false);
+
+    if (m_plater) {
+        const DrawModeDisplayPreferences& prefs = m_plater->model().draw_mode_display_preferences;
+        m_show_measurements = prefs.show_measurements;
+        m_show_coordinates  = prefs.show_coordinates;
+        if (m_measure_toggle) m_measure_toggle->SetValue(m_show_measurements);
+        if (m_coord_toggle) m_coord_toggle->SetValue(m_show_coordinates);
+    }
 
     if (plate) {
         Vec3d origin = plate->get_origin();
@@ -162,6 +187,16 @@ void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
     m_editing_obj_idx = obj_idx;
     m_undo_stack.clear();
     m_redo_stack.clear();
+    m_pending_start.reset();
+    reset_draft(false);
+
+    if (m_plater) {
+        const DrawModeDisplayPreferences& prefs = m_plater->model().draw_mode_display_preferences;
+        m_show_measurements = prefs.show_measurements;
+        m_show_coordinates  = prefs.show_coordinates;
+        if (m_measure_toggle) m_measure_toggle->SetValue(m_show_measurements);
+        if (m_coord_toggle) m_coord_toggle->SetValue(m_show_coordinates);
+    }
 
     update_banner();
     update_layer_label();
@@ -215,6 +250,20 @@ void DrawModePanel::dispatch_command(std::unique_ptr<DrawCommand> cmd)
 
 namespace {
     constexpr int CANVAS_PAD = 14; // pixel margin inside canvas widget
+
+    void draw_feedback_label(wxDC& dc, const wxString& text, wxPoint pos, const wxSize& canvas_size)
+    {
+        constexpr int pad = 4;
+        wxSize text_size = dc.GetTextExtent(text);
+        pos.x = std::clamp(pos.x, CANVAS_PAD, std::max(CANVAS_PAD, canvas_size.x - text_size.x - 2 * pad - CANVAS_PAD));
+        pos.y = std::clamp(pos.y, CANVAS_PAD, std::max(CANVAS_PAD, canvas_size.y - text_size.y - 2 * pad - CANVAS_PAD));
+
+        dc.SetPen(wxPen(wxColour(20, 20, 20), 1));
+        dc.SetBrush(wxBrush(wxColour(245, 245, 220)));
+        dc.DrawRoundedRectangle(pos.x, pos.y, text_size.x + 2 * pad, text_size.y + 2 * pad, 3);
+        dc.SetTextForeground(wxColour(20, 20, 20));
+        dc.DrawText(text, pos.x + pad, pos.y + pad);
+    }
 }
 
 Vec2d DrawModePanel::screen_to_plate(wxPoint pt) const
@@ -246,6 +295,101 @@ Vec2d DrawModePanel::snap_pos(Vec2d pt) const
     const double g = m_nozzle_d;
     return Vec2d(std::round(pt.x() / g) * g,
                  std::round(pt.y() / g) * g);
+}
+
+DrawDirectionSnapMode DrawModePanel::current_snap_mode(bool ctrl_down, bool alt_down) const
+{
+    return draw_resolve_snap_mode(ctrl_down, alt_down);
+}
+
+double DrawModePanel::draft_relative_angle_degrees(const Vec2d& start, const Vec2d& end) const
+{
+    const int active = m_session.active_layer;
+    if (active < 0 || active >= m_session.layer_count() || m_session.layers[active].segments.empty())
+        return 0.0;
+
+    const DrawSegment& previous = m_session.layers[active].segments.back();
+    return draw_relative_angle_degrees(previous.start, previous.end, start, end);
+}
+
+void DrawModePanel::sync_length_input()
+{
+    if (!m_length_input)
+        return;
+
+    m_updating_length_input = true;
+    m_length_input->ChangeValue(m_draft.has_typed_length ? m_draft.typed_length_text : wxString());
+    m_updating_length_input = false;
+}
+
+void DrawModePanel::set_typed_length_text(const wxString& text)
+{
+    if (!m_pending_start)
+        return;
+
+    m_draft.has_typed_length = !text.empty();
+    m_draft.typed_length_text = text;
+    sync_length_input();
+    const bool diagonal_snap = m_draft.snap_mode == DrawDirectionSnapMode::Diagonal45;
+    const bool free_snap = m_draft.snap_mode == DrawDirectionSnapMode::Free;
+    update_draft(m_draft.raw_mouse, diagonal_snap, free_snap);
+}
+
+void DrawModePanel::update_draft(Vec2d raw_mouse, bool ctrl_down, bool alt_down)
+{
+    if (!m_pending_start) {
+        m_draft.active = false;
+        sync_length_input();
+        return;
+    }
+
+    m_draft.active = true;
+    m_draft.start = *m_pending_start;
+    m_draft.raw_mouse = raw_mouse;
+    m_draft.grid_snapped_mouse = snap_pos(raw_mouse);
+    m_draft.snap_mode = current_snap_mode(ctrl_down, alt_down);
+
+    Vec2d constrained = draw_apply_direction_snap(m_draft.start, m_draft.grid_snapped_mouse, m_draft.snap_mode);
+    if (m_draft.has_typed_length) {
+        const std::optional<double> typed_length = draw_parse_length_mm(m_draft.typed_length_text.ToStdString());
+        if (typed_length)
+            constrained = draw_project_typed_length(m_draft.start, constrained, *typed_length);
+    }
+
+    m_draft.constrained_end = constrained;
+    m_draft.length_mm = draw_segment_length_mm(m_draft.start, m_draft.constrained_end);
+    m_draft.angle_degrees = draft_relative_angle_degrees(m_draft.start, m_draft.constrained_end);
+}
+
+void DrawModePanel::reset_draft(bool keep_chain_anchor)
+{
+    if (!keep_chain_anchor)
+        m_pending_start.reset();
+    m_draft = DrawDraftSegment();
+    sync_length_input();
+}
+
+bool DrawModePanel::commit_draft_segment()
+{
+    const int active = m_session.active_layer;
+    if (!m_draft.active || active < 0 || active >= m_session.layer_count())
+        return false;
+    if (m_draft.length_mm <= DRAW_MODE_MIN_SEGMENT_LENGTH_MM)
+        return false;
+
+    DrawSegment seg;
+    seg.start     = m_draft.start;
+    seg.end       = m_draft.constrained_end;
+    seg.is_travel = false;
+    dispatch_command(std::make_unique<AddSegmentCommand>(active, std::move(seg)));
+
+    m_pending_start = m_draft.constrained_end;
+    const Vec2d next_raw = m_draft.constrained_end;
+    m_draft = DrawDraftSegment();
+    m_draft.raw_mouse = next_raw;
+    update_draft(next_raw);
+    sync_length_input();
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -347,9 +491,9 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
     }
 
     // Drawing mode: pending start + preview line
-    if (m_input_mode == DrawInputMode::Drawing && m_pending_start) {
-        wxPoint ps = plate_to_screen(*m_pending_start);
-        wxPoint pm_draw = plate_to_screen(m_mouse_plate);
+    if (m_input_mode == DrawInputMode::Drawing && m_draft.active) {
+        wxPoint ps = plate_to_screen(m_draft.start);
+        wxPoint pm_draw = plate_to_screen(m_draft.constrained_end);
         // Rubber-band preview line
         dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
         dc.DrawLine(ps, pm_draw);
@@ -357,7 +501,14 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         dc.SetPen(wxPen(wxColour(255, 200, 50), 2));
         dc.SetBrush(wxBrush(wxColour(255, 200, 50)));
         dc.DrawCircle(ps, 5);
+        dc.DrawCircle(pm_draw, 4);
         dc.SetBrush(*wxTRANSPARENT_BRUSH);
+
+        if (m_show_measurements && m_draft.length_mm > DRAW_MODE_MIN_SEGMENT_LENGTH_MM) {
+            const wxString label = wxString::FromUTF8(draw_format_length_mm(m_draft.length_mm))
+                + "\n" + wxString::FromUTF8(draw_format_angle_degrees(m_draft.angle_degrees)) + " from previous";
+            draw_feedback_label(dc, label, wxPoint((ps.x + pm_draw.x) / 2 + 8, (ps.y + pm_draw.y) / 2 - 28), sz);
+        }
     }
 
     // Status hint text at the bottom of the canvas
@@ -365,10 +516,10 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         wxString hint;
         if (m_input_mode == DrawInputMode::Drawing) {
             hint = m_pending_start
-                ? wxString("Continuous drawing \u2022 Left-click to extend \u2022 Right-click / Snip to break")
-                : wxString("Click to start drawing");
+                ? wxString("Axis snap \u2022 Ctrl: 45\u00b0 \u2022 Alt: free \u2022 Type length + Enter \u2022 Right-click/Snip/Esc breaks")
+                : wxString("Click to start drawing \u2022 New segments default to horizontal/vertical");
         } else {
-            hint = "Click segment to select \u2022 Drag endpoints \u2022 Del to remove";
+            hint = "Click segment to select \u2022 Drag endpoints \u2022 Arrow keys nudge (Shift = 1 mm) \u2022 Del removes";
         }
         dc.SetFont(wxFont(8, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL));
         dc.SetTextForeground(wxColour(160, 160, 160));
@@ -405,11 +556,27 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         dc.DrawCircle(pd_ep, 5);
     }
 
+    if (m_show_measurements && m_input_mode == DrawInputMode::Editing
+            && m_sel_layer_idx >= 0 && m_sel_layer_idx < m_session.layer_count()
+            && m_sel_seg_idx >= 0 && m_sel_seg_idx < (int)m_session.layers[m_sel_layer_idx].segments.size()) {
+        const DrawLayer& layer = m_session.layers[m_sel_layer_idx];
+        const DrawSegment& seg = layer.segments[m_sel_seg_idx];
+        wxPoint p1 = plate_to_screen(seg.start);
+        wxPoint p2 = plate_to_screen(seg.end);
+        const wxString label = wxString::FromUTF8(draw_format_length_mm(seg.length()))
+            + "\n" + wxString::FromUTF8(draw_format_angle_degrees(draw_segment_relative_angle_degrees(layer, m_sel_seg_idx)))
+            + " from previous";
+        draw_feedback_label(dc, label, wxPoint((p1.x + p2.x) / 2 + 8, (p1.y + p2.y) / 2 - 28), sz);
+    }
+
     // Crosshair at mouse
     wxPoint pm = plate_to_screen(m_mouse_plate);
     dc.SetPen(wxPen(wxColour(140, 140, 140), 1, wxPENSTYLE_DOT));
     dc.DrawLine(pm.x, CANVAS_PAD, pm.x, sz.y - CANVAS_PAD);
     dc.DrawLine(CANVAS_PAD, pm.y, sz.x - CANVAS_PAD, pm.y);
+
+    if (m_show_coordinates)
+        draw_feedback_label(dc, wxString::FromUTF8(draw_format_coordinate_mm(m_mouse_plate)), wxPoint(pm.x + 10, pm.y + 10), sz);
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +585,8 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
 
 void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
 {
-    Vec2d pos = snap_pos(screen_to_plate(evt.GetPosition()));
+    const Vec2d raw_pos = screen_to_plate(evt.GetPosition());
+    Vec2d pos = snap_pos(raw_pos);
 
     if (m_input_mode == DrawInputMode::Editing) {
         int active = m_session.active_layer;
@@ -444,6 +612,8 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
             m_dragging_ep   = EndpointRef{active, ep_seg, ep_is_start};
             m_drag_preview  = ep;
             m_is_dragging   = true;
+            m_pending_start.reset();
+            reset_draft(true);
             m_sel_layer_idx = -1;
             m_sel_seg_idx   = -1;
             if (!m_canvas->HasCapture()) m_canvas->CaptureMouse();
@@ -477,13 +647,10 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
 
     if (!m_pending_start) {
         m_pending_start = pos;
+        update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
     } else {
-        DrawSegment seg;
-        seg.start     = *m_pending_start;
-        seg.end       = pos;
-        seg.is_travel = false;
-        dispatch_command(std::make_unique<AddSegmentCommand>(active, std::move(seg)));
-        m_pending_start = pos;
+        update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
+        commit_draft_segment();
     }
     if (m_canvas) m_canvas->Refresh(false);
 }
@@ -491,7 +658,7 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
 void DrawModePanel::on_canvas_right_down(wxMouseEvent&)
 {
     // Cancel pending draw or active drag
-    m_pending_start.reset();
+    reset_draft(false);
     if (m_is_dragging) {
         if (m_canvas->HasCapture()) m_canvas->ReleaseMouse();
         m_is_dragging = false;
@@ -511,7 +678,7 @@ void DrawModePanel::on_canvas_left_up(wxMouseEvent& evt)
             && ep.segment_index < (int)m_session.layers[ep.layer_index].segments.size()) {
         const DrawSegment& seg = m_session.layers[ep.layer_index].segments[ep.segment_index];
         Vec2d old_pos = ep.is_start ? seg.start : seg.end;
-        Vec2d new_pos = snap_pos(m_drag_preview);
+        Vec2d new_pos = m_drag_preview;
         // Only commit if actually moved
         if ((new_pos - old_pos).squaredNorm() > 1e-12) {
             dispatch_command(std::make_unique<MoveEndpointCommand>(
@@ -525,9 +692,19 @@ void DrawModePanel::on_canvas_left_up(wxMouseEvent& evt)
 
 void DrawModePanel::on_canvas_motion(wxMouseEvent& evt)
 {
-    m_mouse_plate = snap_pos(screen_to_plate(evt.GetPosition()));
-    if (m_is_dragging)
-        m_drag_preview = m_mouse_plate;
+    const Vec2d raw_mouse = screen_to_plate(evt.GetPosition());
+    m_mouse_plate = snap_pos(raw_mouse);
+    if (m_is_dragging && m_dragging_ep.has_value()) {
+        const EndpointRef& ep = *m_dragging_ep;
+        if (ep.layer_index >= 0 && ep.layer_index < m_session.layer_count()
+                && ep.segment_index >= 0 && ep.segment_index < (int)m_session.layers[ep.layer_index].segments.size()) {
+            const DrawSegment& seg = m_session.layers[ep.layer_index].segments[ep.segment_index];
+            const Vec2d fixed = ep.is_start ? seg.end : seg.start;
+            m_drag_preview = draw_apply_direction_snap(fixed, m_mouse_plate, current_snap_mode(evt.ControlDown(), evt.AltDown()));
+        }
+    } else if (m_input_mode == DrawInputMode::Drawing && m_pending_start) {
+        update_draft(raw_mouse, evt.ControlDown(), evt.AltDown());
+    }
     if (m_canvas) m_canvas->Refresh(false);
     evt.Skip();
 }
@@ -542,6 +719,7 @@ void DrawModePanel::on_draw_toggle(wxCommandEvent&)
     m_sel_seg_idx   = -1;
     m_dragging_ep.reset();
     m_is_dragging   = false;
+    reset_draft(false);
     if (m_canvas) m_canvas->Refresh(false);
 }
 
@@ -551,7 +729,7 @@ void DrawModePanel::on_edit_toggle(wxCommandEvent&)
     m_edit_toggle->SetValue(true);
     m_draw_toggle->SetValue(false);
     // Cancel any in-progress draw
-    m_pending_start.reset();
+    reset_draft(false);
     if (m_canvas) m_canvas->Refresh(false);
 }
 
@@ -559,6 +737,7 @@ void DrawModePanel::on_prev_layer(wxCommandEvent&)
 {
     if (m_session.active_layer > 0) {
         m_session.active_layer--;
+        reset_draft(false);
         refresh();
     }
 }
@@ -568,6 +747,7 @@ void DrawModePanel::on_next_layer(wxCommandEvent&)
     int last = m_session.layer_count() - 1;
     if (m_session.active_layer < last) {
         m_session.active_layer++;
+        reset_draft(false);
         refresh();
     }
 }
@@ -588,6 +768,7 @@ void DrawModePanel::on_clear_layer(wxCommandEvent&)
     int active = m_session.active_layer;
     if (active < 0 || active >= m_session.layer_count()) return;
     dispatch_command(std::make_unique<ClearLayerCommand>(active));
+    reset_draft(false);
 }
 
 // Build a TriangleMesh that visually represents the drawn paths as flat
@@ -775,9 +956,9 @@ void DrawModePanel::on_char_hook(wxKeyEvent& evt)
         return;
     }
 
-    // Escape in Drawing mode: snip the continuous chain
+    // Escape in Drawing mode: snip the continuous chain and cancel any typed length.
     if (evt.GetKeyCode() == WXK_ESCAPE && m_input_mode == DrawInputMode::Drawing) {
-        m_pending_start.reset();
+        reset_draft(false);
         if (m_canvas) m_canvas->Refresh(false);
         return;
     }
@@ -812,6 +993,50 @@ void DrawModePanel::on_char_hook(wxKeyEvent& evt)
             m_sel_seg_idx   = -1;
             return;
         }
+
+        const Vec2d delta = draw_nudge_delta_from_key(kc, evt.ShiftDown());
+        if (delta.squaredNorm() > 0.0) {
+            dispatch_command(std::make_unique<TranslateSegmentCommand>(m_sel_layer_idx, m_sel_seg_idx, delta));
+            return;
+        }
+    }
+
+    if (m_input_mode == DrawInputMode::Drawing && m_pending_start && !evt.ControlDown() && !evt.AltDown()) {
+        const int kc = evt.GetKeyCode();
+        if ((kc >= '0' && kc <= '9') || kc == '.' || kc == ',' || (kc >= WXK_NUMPAD0 && kc <= WXK_NUMPAD9) || kc == WXK_DECIMAL) {
+            wxString text = m_draft.typed_length_text;
+            if (kc >= WXK_NUMPAD0 && kc <= WXK_NUMPAD9)
+                text += wxChar('0' + (kc - WXK_NUMPAD0));
+            else if (kc == WXK_DECIMAL) {
+                if (text.Contains('.') || text.Contains(','))
+                    return;
+                text += '.';
+            } else if (kc == '.' || kc == ',') {
+                if (text.Contains('.') || text.Contains(','))
+                    return;
+                text += wxChar(kc);
+            } else {
+                text += wxChar(kc);
+            }
+            set_typed_length_text(text);
+            if (m_canvas) m_canvas->Refresh(false);
+            return;
+        }
+        if (kc == WXK_BACK) {
+            wxString text = m_draft.typed_length_text;
+            if (!text.empty())
+                text.RemoveLast();
+            set_typed_length_text(text);
+            if (m_canvas) m_canvas->Refresh(false);
+            return;
+        }
+        if (kc == WXK_RETURN || kc == WXK_NUMPAD_ENTER) {
+            if (m_draft.has_typed_length && draw_parse_length_mm(m_draft.typed_length_text.ToStdString())) {
+                commit_draft_segment();
+                if (m_canvas) m_canvas->Refresh(false);
+                return;
+            }
+        }
     }
     evt.Skip();
 }
@@ -827,14 +1052,54 @@ void DrawModePanel::on_snap_toggle(wxCommandEvent&)
     m_snap_to_grid = m_snap_toggle->GetValue();
     // Immediately snap the current mouse position so crosshair updates
     m_mouse_plate = snap_pos(m_mouse_plate);
+    const bool diagonal_snap = m_draft.snap_mode == DrawDirectionSnapMode::Diagonal45;
+    const bool free_snap = m_draft.snap_mode == DrawDirectionSnapMode::Free;
+    update_draft(m_draft.raw_mouse, diagonal_snap, free_snap);
     if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_measure_toggle(wxCommandEvent&)
+{
+    m_show_measurements = m_measure_toggle->GetValue();
+    if (m_plater)
+        m_plater->model().draw_mode_display_preferences.show_measurements = m_show_measurements;
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_coord_toggle(wxCommandEvent&)
+{
+    m_show_coordinates = m_coord_toggle->GetValue();
+    if (m_plater)
+        m_plater->model().draw_mode_display_preferences.show_coordinates = m_show_coordinates;
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_length_text(wxCommandEvent&)
+{
+    if (m_updating_length_input || !m_length_input || !m_pending_start)
+        return;
+
+    m_draft.has_typed_length = !m_length_input->GetValue().empty();
+    m_draft.typed_length_text = m_length_input->GetValue();
+    const bool diagonal_snap = m_draft.snap_mode == DrawDirectionSnapMode::Diagonal45;
+    const bool free_snap = m_draft.snap_mode == DrawDirectionSnapMode::Free;
+    update_draft(m_draft.raw_mouse, diagonal_snap, free_snap);
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_length_enter(wxCommandEvent&)
+{
+    if (m_draft.has_typed_length && draw_parse_length_mm(m_draft.typed_length_text.ToStdString())) {
+        commit_draft_segment();
+        if (m_canvas) m_canvas->Refresh(false);
+    }
 }
 
 void DrawModePanel::on_snip(wxCommandEvent&)
 {
     // Break the continuous chain. Next left-click starts a new extrusion path.
     // The G-code generator will insert a retract + travel between the two paths.
-    m_pending_start.reset();
+    reset_draft(false);
     if (m_canvas) m_canvas->Refresh(false);
 }
 
@@ -844,11 +1109,12 @@ void DrawModePanel::sync_chain_anchor()
     const int active = m_session.active_layer;
     if (active < 0 || active >= m_session.layer_count()
             || m_session.layers[active].segments.empty()) {
-        m_pending_start.reset();
+        reset_draft(false);
         return;
     }
     // Continue chain from the last segment endpoint on the active layer.
     m_pending_start = m_session.layers[active].segments.back().end;
+    update_draft(m_pending_start.value());
 }
 
 } // namespace GUI

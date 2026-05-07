@@ -57,6 +57,20 @@ struct MoveEndpointCommand : DrawCommand {
     void undo(DrawSession& session) override;
 };
 
+// Translate a whole committed segment by a plate-space delta. Used by Edit Mode
+// arrow-key nudging so both endpoints move through one undoable command entry.
+struct TranslateSegmentCommand : DrawCommand {
+    int   layer_index;
+    int   segment_index;
+    Vec2d delta;
+
+    TranslateSegmentCommand(int layer_idx, int seg_idx, Vec2d delta_)
+        : layer_index(layer_idx), segment_index(seg_idx), delta(delta_) {}
+
+    void execute(DrawSession& session) override;
+    void undo(DrawSession& session) override;
+};
+
 // Append a new empty layer with the given layer height (mm).
 struct AddLayerCommand : DrawCommand {
     double layer_height;

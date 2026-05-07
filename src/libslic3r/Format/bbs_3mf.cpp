@@ -223,6 +223,8 @@ const std::string PROJECT_EMBEDDED_FILAMENT_PRESETS_FILE = "Metadata/filament_se
 const std::string PROJECT_EMBEDDED_PRINTER_PRESETS_FILE = "Metadata/machine_settings_";
 const std::string CUT_INFORMATION_FILE = "Metadata/cut_information.xml";
 const std::string DRAW_SESSION_FILE_PREFIX = "Metadata/draw_session_obj_"; // + <1-based-obj-idx>.xml
+const std::string DRAW_MODE_SHOW_MEASUREMENTS_TAG = "OrcaSlicer:DrawModeShowMeasurements";
+const std::string DRAW_MODE_SHOW_COORDINATES_TAG  = "OrcaSlicer:DrawModeShowCoordinates";
 
 const unsigned int AUXILIARY_STR_LEN = 12;
 const unsigned int METADATA_STR_LEN = 9;
@@ -1502,6 +1504,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         m_model->model_info = std::make_shared<ModelInfo>();
         m_model->model_info->load(model_info);
+        if (auto it = model_info.metadata_items.find(DRAW_MODE_SHOW_MEASUREMENTS_TAG); it != model_info.metadata_items.end())
+            m_model->draw_mode_display_preferences.show_measurements =
+                draw_parse_bool_preference(it->second, m_model->draw_mode_display_preferences.show_measurements);
+        if (auto it = model_info.metadata_items.find(DRAW_MODE_SHOW_COORDINATES_TAG); it != model_info.metadata_items.end())
+            m_model->draw_mode_display_preferences.show_coordinates =
+                draw_parse_bool_preference(it->second, m_model->draw_mode_display_preferences.show_coordinates);
 
         if (m_thumbnail_middle.empty()) m_thumbnail_middle = m_thumbnail_path;
         if (m_thumbnail_small.empty()) m_thumbnail_small = m_thumbnail_path;
@@ -1796,6 +1804,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         m_model->model_info = std::make_shared<ModelInfo>();
         m_model->model_info->load(model_info);
+        if (auto it = model_info.metadata_items.find(DRAW_MODE_SHOW_MEASUREMENTS_TAG); it != model_info.metadata_items.end())
+            m_model->draw_mode_display_preferences.show_measurements =
+                draw_parse_bool_preference(it->second, m_model->draw_mode_display_preferences.show_measurements);
+        if (auto it = model_info.metadata_items.find(DRAW_MODE_SHOW_COORDINATES_TAG); it != model_info.metadata_items.end())
+            m_model->draw_mode_display_preferences.show_coordinates =
+                draw_parse_bool_preference(it->second, m_model->draw_mode_display_preferences.show_coordinates);
         if (!m_thumbnail_small.empty()) m_model->model_info->metadata_items.emplace("Thumbnail_Small", m_thumbnail_small);
         if (!m_thumbnail_middle.empty()) m_model->model_info->metadata_items.emplace("Thumbnail_Middle", m_thumbnail_middle);
 
@@ -6766,6 +6780,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 metadata_item_map[BBL_APPLICATION_TAG] = (boost::format("%1%-%2%") % "BambuStudio" % SLIC3R_VERSION).str();
             }
             metadata_item_map[BBS_3MF_VERSION] = std::to_string(VERSION_BBS_3MF);
+            metadata_item_map[DRAW_MODE_SHOW_MEASUREMENTS_TAG] =
+                draw_format_bool_preference(model.draw_mode_display_preferences.show_measurements);
+            metadata_item_map[DRAW_MODE_SHOW_COORDINATES_TAG] =
+                draw_format_bool_preference(model.draw_mode_display_preferences.show_coordinates);
 
             if (!model.mk_name.empty()) {
                 metadata_item_map[BBL_MAKERLAB_TAG] = xml_escape(model.mk_name);

@@ -5,9 +5,11 @@
 #include <wx/stattext.h>
 #include <wx/button.h>
 #include <wx/tglbtn.h>
+#include <wx/textctrl.h>
 #include <wx/dcclient.h>
 
 #include "libslic3r/DrawSession.hpp"
+#include "libslic3r/DrawModeFeedback.hpp"
 #include "DrawModeCommands.hpp"
 #include "DrawModeInputHandler.hpp"
 
@@ -57,6 +59,9 @@ private:
     wxToggleButton*    m_edit_toggle    { nullptr };
     wxToggleButton*    m_fill_toggle    { nullptr }; // filled-quad width preview
     wxToggleButton*    m_snap_toggle    { nullptr }; // snap-to-grid (on by default)
+    wxToggleButton*    m_measure_toggle { nullptr };
+    wxToggleButton*    m_coord_toggle   { nullptr };
+    wxTextCtrl*        m_length_input   { nullptr };
     wxButton*          m_snip_btn       { nullptr }; // break continuous chain
     wxButton*          m_prev_layer_btn { nullptr };
     wxButton*          m_next_layer_btn { nullptr };
@@ -87,6 +92,23 @@ private:
     bool                 m_show_filled { false };
     // Snap-to-grid (grid resolution = nozzle_diameter, on by default)
     bool                 m_snap_to_grid { true };
+    bool                 m_show_measurements { true };
+    bool                 m_show_coordinates  { true };
+
+    struct DrawDraftSegment {
+        bool                  active = false;
+        Vec2d                 start { 0.0, 0.0 };
+        Vec2d                 raw_mouse { 0.0, 0.0 };
+        Vec2d                 grid_snapped_mouse { 0.0, 0.0 };
+        Vec2d                 constrained_end { 0.0, 0.0 };
+        double                length_mm = 0.0;
+        double                angle_degrees = 0.0;
+        bool                  has_typed_length = false;
+        wxString              typed_length_text;
+        DrawDirectionSnapMode snap_mode { DrawDirectionSnapMode::Cardinal };
+    };
+    DrawDraftSegment    m_draft;
+    bool                m_updating_length_input { false };
 
     // Edit mode selection / drag state
     int                  m_sel_layer_idx { -1 };
@@ -109,6 +131,13 @@ private:
     wxPoint plate_to_screen(Vec2d   pt) const;
     // Round pt to the nearest nozzle-diameter grid point (no-op when snap off).
     Vec2d   snap_pos(Vec2d pt) const;
+    DrawDirectionSnapMode current_snap_mode(bool ctrl_down = false, bool alt_down = false) const;
+    void    update_draft(Vec2d raw_mouse, bool ctrl_down = false, bool alt_down = false);
+    void    reset_draft(bool keep_chain_anchor);
+    bool    commit_draft_segment();
+    void    sync_length_input();
+    void    set_typed_length_text(const wxString& text);
+    double  draft_relative_angle_degrees(const Vec2d& start, const Vec2d& end) const;
 
     // Canvas event handlers
     void on_canvas_paint(wxPaintEvent&);
@@ -123,6 +152,10 @@ private:
     void on_edit_toggle(wxCommandEvent& evt);
     void on_fill_toggle(wxCommandEvent& evt);
     void on_snap_toggle(wxCommandEvent& evt);
+    void on_measure_toggle(wxCommandEvent& evt);
+    void on_coord_toggle(wxCommandEvent& evt);
+    void on_length_text(wxCommandEvent& evt);
+    void on_length_enter(wxCommandEvent& evt);
     void on_snip(wxCommandEvent& evt);
     // Sync the chain anchor (m_pending_start) to the last segment endpoint
     // after undo/redo, so the rubber-band previews the correct continuation.
