@@ -1274,13 +1274,19 @@ void MainFrame::init_tabpanel() {
             //monitor
         }
         else if (m_draw_mode_panel != nullptr && panel == m_draw_mode_panel) {
-            // Activate draw mode: snapshot current plate origin
+            // Activate draw mode: snapshot current plate origin.
+            // If the panel already has an in-progress session (e.g., user clicked
+            // Simulate and then came back), call reactivate() to preserve the drawing.
+            // Otherwise, start fresh with activate().
             PartPlate* plate = nullptr;
             if (m_plater) {
                 auto& plist = m_plater->get_partplate_list();
                 plate = plist.get_curr_plate();
             }
-            m_draw_mode_panel->activate(plate);
+            if (m_draw_mode_panel->has_session())
+                m_draw_mode_panel->reactivate(plate);
+            else
+                m_draw_mode_panel->activate(plate);
         }
 #ifndef __APPLE__
         if (sel == tp3DEditor) {

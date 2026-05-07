@@ -128,7 +128,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_canvas->Bind(wxEVT_MIDDLE_DOWN, &DrawModePanel::on_canvas_middle_down, this);
     m_canvas->Bind(wxEVT_MIDDLE_UP,   &DrawModePanel::on_canvas_middle_up,   this);
     m_canvas->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent&) {
-        // Capture lost externally — clean up drag state without calling ReleaseMouse
+        // Capture lost externally  -  clean up drag state without calling ReleaseMouse
         m_is_dragging = false;
         m_dragging_ep.reset();
         m_pan_start.reset();
@@ -187,6 +187,39 @@ void DrawModePanel::activate(PartPlate* plate)
     if (m_canvas) m_canvas->Refresh();
 }
 
+void DrawModePanel::reactivate(PartPlate* plate)
+{
+    // Cancel any in-progress rubber-band draw, but keep committed segments.
+    reset_draft(false);
+    m_pending_start.reset();
+
+    if (plate) {
+        Vec3d origin = plate->get_origin();
+        m_plate_x = origin.x();
+        m_plate_y = origin.y();
+    }
+
+    // Refresh nozzle diameter from current preset in case it changed.
+    m_nozzle_d = 0.4;
+    if (wxGetApp().preset_bundle) {
+        const auto& pcfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        if (auto* nd = pcfg.option<ConfigOptionFloats>("nozzle_diameter"))
+            if (!nd->values.empty()) m_nozzle_d = nd->values.front();
+    }
+
+    if (m_plater) {
+        const DrawModeDisplayPreferences& prefs = m_plater->model().draw_mode_display_preferences;
+        m_show_measurements = prefs.show_measurements;
+        m_show_coordinates  = prefs.show_coordinates;
+        if (m_measure_toggle) m_measure_toggle->SetValue(m_show_measurements);
+        if (m_coord_toggle) m_coord_toggle->SetValue(m_show_coordinates);
+    }
+
+    update_banner();
+    update_layer_label();
+    if (m_canvas) m_canvas->Refresh();
+}
+
 void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
 {
     if (!obj || !obj->draw_session) return;
@@ -223,7 +256,7 @@ void DrawModePanel::update_banner()
 {
     wxString info = "Draw Mode";
     if (m_editing_obj_idx >= 0)
-        info += wxString::Format(" — Editing object %d", m_editing_obj_idx + 1);
+        info += wxString::Format(" - Editing object %d", m_editing_obj_idx + 1);
     if (m_banner_text)
         m_banner_text->SetLabel(info);
 }
@@ -234,7 +267,7 @@ void DrawModePanel::update_layer_label()
 
     int count = m_session.layer_count();
     if (count == 0) {
-        m_layer_label->SetLabel("No layers — click '+ Layer' to start");
+        m_layer_label->SetLabel("No layers - click '+ Layer' to start");
         return;
     }
 
@@ -490,7 +523,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
     if (m_session.layer_count() == 0) {
         dc.SetTextForeground(wxColour(160, 160, 160));
         dc.SetFont(GetFont().Larger());
-        wxString msg = "No layers — click '+ Layer' to start";
+        wxString msg = "No layers - click '+ Layer' to start";
         wxSize ts = dc.GetTextExtent(msg);
         dc.DrawText(msg, (sz.x - ts.x) / 2, (sz.y - ts.y) / 2);
         draw_scale_indicator(dc, sz, m_plate_w_mm, m_zoom_factor);
@@ -508,14 +541,14 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
             bool is_sel = (m_sel_layer_idx == li && m_sel_seg_idx == si);
 
             if (is_sel) {
-                // Selected segment — bright yellow
+                // Selected segment  -  bright yellow
                 dc.SetPen(wxPen(wxColour(255, 255, 0), 3));
                 dc.SetBrush(wxBrush(wxColour(255, 255, 0)));
                 dc.DrawLine(p1, p2);
                 dc.DrawCircle(p1, 4);
                 dc.DrawCircle(p2, 4);
             } else if (seg.is_travel) {
-                // Travel move — blue dashed
+                // Travel move  -  blue dashed
                 wxColour c = is_active ? wxColour(80, 140, 255) : wxColour(30, 55, 100);
                 dc.SetPen(wxPen(c, 1, wxPENSTYLE_SHORT_DASH));
                 dc.DrawLine(p1, p2);
@@ -559,7 +592,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         // Rubber-band preview line
         dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
         dc.DrawLine(ps, pm_draw);
-        // Filled anchor dot — shows the active chain start point
+        // Filled anchor dot  -  shows the active chain start point
         dc.SetPen(wxPen(wxColour(255, 200, 50), 2));
         dc.SetBrush(wxBrush(wxColour(255, 200, 50)));
         dc.DrawCircle(ps, 5);
@@ -704,7 +737,7 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
     // Drawing mode
     int active = m_session.active_layer;
     if (active < 0 || active >= m_session.layer_count()) {
-        wxMessageBox("Add a layer first — click '+ Layer'.",
+            wxMessageBox("Add a layer first - click '+ Layer'.",
                      "Draw Mode", wxOK | wxICON_INFORMATION, this);
         return;
     }
@@ -883,7 +916,7 @@ void DrawModePanel::on_next_layer(wxCommandEvent&)
 
 void DrawModePanel::on_add_layer(wxCommandEvent&)
 {
-    // Default layer height — read from active print preset
+    // Default layer height  -  read from active print preset
     double lh = 0.2;
     if (wxGetApp().preset_bundle) {
         lh = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
@@ -941,7 +974,7 @@ static TriangleMesh make_draw_path_mesh(const DrawSession& session, double nozzl
             verts.emplace_back(bx + px, by + py, zt); // b+6 end-right   top
             verts.emplace_back(bx - px, by - py, zt); // b+7 end-left    top
 
-            // 12 triangles — winding gives outward normals (right-hand rule)
+            // 12 triangles  -  winding gives outward normals (right-hand rule)
             // Bottom face (-Z normal)
             faces.emplace_back(b+0, b+1, b+2);
             faces.emplace_back(b+0, b+2, b+3);
@@ -967,10 +1000,10 @@ static TriangleMesh make_draw_path_mesh(const DrawSession& session, double nozzl
     return TriangleMesh(verts, faces);
 }
 
-bool DrawModePanel::apply_session_to_model()
+bool DrawModePanel::apply_session_to_model(bool reset_after)
 {
     if (m_session.is_empty()) {
-        wxMessageBox("Nothing to finalize — draw some segments first.", "Draw Mode",
+        wxMessageBox("Nothing to finalize  -  draw some segments first.", "Draw Mode",
             wxOK | wxICON_INFORMATION, this);
         return false;
     }
@@ -1004,7 +1037,7 @@ bool DrawModePanel::apply_session_to_model()
             obj->delete_volume(0);
 
         // Add the freshly-built mesh as the single MODEL_PART volume.
-        // Pass false so the mesh is NOT auto-centered — it is already in
+        // Pass false so the mesh is NOT auto-centered  -  it is already in
         // plate-relative coordinates.
         obj->add_volume(std::move(path_mesh), ModelVolumeType::MODEL_PART, false);
 
@@ -1041,28 +1074,35 @@ bool DrawModePanel::apply_session_to_model()
         // so place the object at the plate's world origin.
         ModelInstance* inst = obj->add_instance();
         inst->set_offset(Vec3d(m_plate_x, m_plate_y, 0.0));
+
+        // Track the new object so a subsequent simulate/finalize updates it in-place.
+        if (!reset_after)
+            m_editing_obj_idx = static_cast<int>(model.objects.size()) - 1;
     }
 
     m_plater->update();
     wxGetApp().obj_list()->update_after_undo_redo();
 
-    // Reset panel state so user can start a fresh drawing session.
-    m_editing_obj_idx = -1;
-    m_session         = DrawSession();
-    m_undo_stack.clear();
-    m_redo_stack.clear();
-    m_pending_start.reset();
-    update_banner();
-    update_layer_label();
+    if (reset_after) {
+        // Finalize path: clear the panel so the user starts a fresh session.
+        m_editing_obj_idx = -1;
+        m_session         = DrawSession();
+        m_undo_stack.clear();
+        m_redo_stack.clear();
+        m_pending_start.reset();
+        update_banner();
+        update_layer_label();
+    }
 
     return true;
 }
 
 void DrawModePanel::on_simulate(wxCommandEvent&)
 {
-    if (!apply_session_to_model()) return;
+    // Write session to model without resetting the panel  -  user can keep editing.
+    if (!apply_session_to_model(/*reset_after=*/false)) return;
 
-    // Trigger the slicing pipeline — BackgroundSlicingProcess will detect
+    // Trigger the slicing pipeline  -  BackgroundSlicingProcess will detect
     // the all-draw-path plate and call DrawPathGCodeGenerator directly.
     m_plater->reslice();
 
@@ -1072,7 +1112,7 @@ void DrawModePanel::on_simulate(wxCommandEvent&)
 
 void DrawModePanel::on_finalize(wxCommandEvent&)
 {
-    if (!apply_session_to_model()) return;
+    if (!apply_session_to_model(/*reset_after=*/true)) return;
 
     // Switch back to 3D Editor tab.
     wxGetApp().mainframe->select_tab((size_t)MainFrame::tp3DEditor);

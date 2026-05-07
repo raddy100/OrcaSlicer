@@ -35,9 +35,16 @@ public:
     DrawModePanel(wxWindow* parent, Plater* plater);
     ~DrawModePanel();
 
-    // Called when user switches to the Draw tab.
-    // Snapshots the active plate and resets state for a new drawing session.
+    // Called when user switches to the Draw tab for the first time (fresh session).
+    // Snapshots the active plate and resets ALL state.
     void activate(PartPlate* plate);
+
+    // Called when user returns to the Draw tab after Simulate.
+    // Updates plate/nozzle metadata without clearing the existing session.
+    void reactivate(PartPlate* plate);
+
+    // Returns true when the panel holds uncommitted or committed drawing data.
+    bool has_session() const { return !m_session.is_empty(); }
 
     // Called when the user wants to edit an already-finalized draw object.
     // Loads the existing DrawSession into the panel for modification.
@@ -180,8 +187,10 @@ private:
     void on_char_hook(wxKeyEvent& evt);
 
     // Shared finalize logic: create/update the ModelObject on the plate.
+    // When reset_after is true (Finalize), the panel state is cleared afterwards.
+    // When false (Simulate), the session stays live so the user can continue editing.
     // Returns true on success. Does NOT switch tabs.
-    bool apply_session_to_model();
+    bool apply_session_to_model(bool reset_after = true);
 };
 
 } // namespace GUI
