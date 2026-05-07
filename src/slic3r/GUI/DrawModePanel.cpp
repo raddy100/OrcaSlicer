@@ -295,11 +295,12 @@ void DrawModePanel::dispatch_command(std::unique_ptr<DrawCommand> cmd)
 namespace {
     constexpr int CANVAS_PAD = 14; // pixel margin inside canvas widget
 
-    void draw_scale_indicator(wxDC& dc, const wxSize& canvas_size, double plate_width_mm, double zoom_factor)
+    void draw_scale_indicator(wxDC& dc, const wxSize& canvas_size, double scale_px_per_mm)
     {
         const double inner_w = std::max(1.0, static_cast<double>(canvas_size.x - 2 * CANVAS_PAD));
-        const int bar_length_px = draw_scale_bar_length_pixels(
-            DRAW_MODE_SCALE_GRID_MM, plate_width_mm, zoom_factor, inner_w);
+        const int bar_length_px = (scale_px_per_mm > 0)
+            ? std::max(1, static_cast<int>(std::round(DRAW_MODE_SCALE_GRID_MM * scale_px_per_mm)))
+            : 0;
         if (bar_length_px <= 0)
             return;
 
@@ -343,43 +344,50 @@ namespace {
     }
 }
 
-Vec2d DrawModePanel::screen_to_plate(wxPoint pt) const
+DrawModePanel::DrawTransform DrawModePanel::get_draw_transform() const
 {
-    if (!m_canvas) return Vec2d(0.0, 0.0);
+    DrawTransform t{};
+    if (!m_canvas) return t;
     wxSize sz = m_canvas->GetClientSize();
     double inner_w = sz.x - 2 * CANVAS_PAD;
     double inner_h = sz.y - 2 * CANVAS_PAD;
-    if (inner_w <= 0 || inner_h <= 0) return Vec2d(0.0, 0.0);
-    
-    // Apply zoom and pan: screen -> normalized [0,1] -> plate-mm with zoom/pan
-    double norm_x = (pt.x - CANVAS_PAD) / inner_w;
-    double norm_y = 1.0 - (pt.y - CANVAS_PAD) / inner_h;
-    
-    // Zoom transforms the visible plate area
-    double visible_w = m_plate_w_mm / m_zoom_factor;
-    double visible_h = m_plate_h_mm / m_zoom_factor;
-    
-    double px = norm_x * visible_w + m_pan_offset.x();
-    double py = norm_y * visible_h + m_pan_offset.y();
+    if (inner_w <= 0 || inner_h <= 0) return t;
+
+    t.visible_w = m_plate_w_mm / m_zoom_factor;
+    t.visible_h = m_plate_h_mm / m_zoom_factor;
+
+    // Uniform scale: fit visible plate area in canvas while preserving 1:1 aspect ratio
+    // so that 10 mm looks visually the same in both X and Y (square grid cells).
+    t.scale = std::min(inner_w / t.visible_w, inner_h / t.visible_h);
+
+    t.draw_w = t.scale * t.visible_w;
+    t.draw_h = t.scale * t.visible_h;
+
+    // Center the drawing area within the inner canvas area.
+    t.draw_x0 = CANVAS_PAD + (inner_w - t.draw_w) / 2.0;
+    t.draw_y0 = CANVAS_PAD + (inner_h - t.draw_h) / 2.0;
+    return t;
+}
+
+Vec2d DrawModePanel::screen_to_plate(wxPoint pt) const
+{
+    if (!m_canvas) return Vec2d(0.0, 0.0);
+    const DrawTransform t = get_draw_transform();
+    if (t.scale <= 0) return Vec2d(0.0, 0.0);
+
+    double px = (pt.x - t.draw_x0) / t.scale + m_pan_offset.x();
+    // Screen Y grows downward; plate Y grows upward.
+    double py = (t.draw_h - (pt.y - t.draw_y0)) / t.scale + m_pan_offset.y();
     return Vec2d(px, py);
 }
 
 wxPoint DrawModePanel::plate_to_screen(Vec2d pt) const
 {
     if (!m_canvas) return wxPoint(0, 0);
-    wxSize sz = m_canvas->GetClientSize();
-    double inner_w = sz.x - 2 * CANVAS_PAD;
-    double inner_h = sz.y - 2 * CANVAS_PAD;
-    
-    // Apply zoom and pan: plate-mm -> normalized [0,1] with zoom/pan -> screen
-    double visible_w = m_plate_w_mm / m_zoom_factor;
-    double visible_h = m_plate_h_mm / m_zoom_factor;
-    
-    double norm_x = (pt.x() - m_pan_offset.x()) / visible_w;
-    double norm_y = (pt.y() - m_pan_offset.y()) / visible_h;
-    
-    int sx = CANVAS_PAD + static_cast<int>(norm_x * inner_w);
-    int sy = CANVAS_PAD + static_cast<int>((1.0 - norm_y) * inner_h);
+    const DrawTransform t = get_draw_transform();
+
+    int sx = static_cast<int>(t.draw_x0 + (pt.x() - m_pan_offset.x()) * t.scale);
+    int sy = static_cast<int>(t.draw_y0 + (t.visible_h - (pt.y() - m_pan_offset.y())) * t.scale);
     return wxPoint(sx, sy);
 }
 
@@ -501,22 +509,26 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
     dc.SetBackground(wxBrush(wxColour(30, 30, 30)));
     dc.Clear();
 
-    // Plate rectangle
+    // Plate rectangle — use the centered uniform-scale drawing area
+    const DrawTransform dt = get_draw_transform();
+    const int drx = static_cast<int>(dt.draw_x0);
+    const int dry = static_cast<int>(dt.draw_y0);
+    const int drw = static_cast<int>(dt.draw_w);
+    const int drh = static_cast<int>(dt.draw_h);
+
     dc.SetPen(wxPen(wxColour(90, 90, 90), 1));
     dc.SetBrush(wxBrush(wxColour(45, 45, 45)));
-    dc.DrawRectangle(CANVAS_PAD, CANVAS_PAD,
-                     sz.x - 2 * CANVAS_PAD, sz.y - 2 * CANVAS_PAD);
+    dc.DrawRectangle(drx, dry, drw, drh);
 
-    // Subtle grid every 10 mm
+    // Subtle grid every 10 mm — clipped to the drawing rect
     dc.SetPen(wxPen(wxColour(60, 60, 60), 1, wxPENSTYLE_DOT));
     for (double x = 10.0; x < m_plate_w_mm; x += 10.0) {
         wxPoint p1 = plate_to_screen(Vec2d(x, 0.0));
-        wxPoint p2 = plate_to_screen(Vec2d(x, m_plate_h_mm));
-        dc.DrawLine(p1.x, CANVAS_PAD, p1.x, sz.y - CANVAS_PAD);
+        dc.DrawLine(p1.x, dry, p1.x, dry + drh);
     }
     for (double y = 10.0; y < m_plate_h_mm; y += 10.0) {
         wxPoint p1 = plate_to_screen(Vec2d(0.0, y));
-        dc.DrawLine(CANVAS_PAD, p1.y, sz.x - CANVAS_PAD, p1.y);
+        dc.DrawLine(drx, p1.y, drx + drw, p1.y);
     }
 
     // No-layers message
@@ -526,7 +538,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         wxString msg = "No layers - click '+ Layer' to start";
         wxSize ts = dc.GetTextExtent(msg);
         dc.DrawText(msg, (sz.x - ts.x) / 2, (sz.y - ts.y) / 2);
-        draw_scale_indicator(dc, sz, m_plate_w_mm, m_zoom_factor);
+        draw_scale_indicator(dc, sz, dt.scale);
         return;
     }
 
@@ -618,7 +630,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         }
         dc.SetFont(wxFont(8, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL));
         dc.SetTextForeground(wxColour(160, 160, 160));
-        dc.DrawText(hint, CANVAS_PAD + 4, sz.y - CANVAS_PAD - 18);
+        dc.DrawText(hint, drx + 4, dry + drh - 20);
     }
 
     // Edit mode: endpoint handles (hollow circles on active layer)
@@ -664,16 +676,16 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         draw_feedback_label(dc, label, wxPoint((p1.x + p2.x) / 2 + 8, (p1.y + p2.y) / 2 - 28), sz);
     }
 
-    // Crosshair at mouse
+    // Crosshair at mouse — clipped to the drawing area
     wxPoint pm = plate_to_screen(m_mouse_plate);
     dc.SetPen(wxPen(wxColour(140, 140, 140), 1, wxPENSTYLE_DOT));
-    dc.DrawLine(pm.x, CANVAS_PAD, pm.x, sz.y - CANVAS_PAD);
-    dc.DrawLine(CANVAS_PAD, pm.y, sz.x - CANVAS_PAD, pm.y);
+    dc.DrawLine(pm.x, dry, pm.x, dry + drh);
+    dc.DrawLine(drx, pm.y, drx + drw, pm.y);
 
     if (m_show_coordinates)
         draw_feedback_label(dc, wxString::FromUTF8(draw_format_coordinate_mm(m_mouse_plate)), wxPoint(pm.x + 10, pm.y + 10), sz);
 
-    draw_scale_indicator(dc, sz, m_plate_w_mm, m_zoom_factor);
+    draw_scale_indicator(dc, sz, dt.scale);
 }
 
 // ---------------------------------------------------------------------------
@@ -690,10 +702,9 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
         if (active < 0 || active >= m_session.layer_count()) return;
         const DrawLayer& layer = m_session.layers[active];
 
-        // Threshold: ~8 screen pixels converted to plate-space mm at the current zoom.
-        wxSize sz = m_canvas->GetClientSize();
-        double inner_w = std::max(1.0, (double)(sz.x - 2 * CANVAS_PAD));
-        double thr = 8.0 / (inner_w / (m_plate_w_mm / m_zoom_factor));
+        // Threshold: ~8 screen pixels converted to plate-space mm using the uniform scale.
+        const DrawTransform hit_t = get_draw_transform();
+        double thr = hit_t.scale > 0 ? 8.0 / hit_t.scale : 1.0;
 
         // Priority 1: endpoints
         int ep_seg = -1; bool ep_is_start = false; double best_ep = thr;
@@ -795,18 +806,14 @@ void DrawModePanel::on_canvas_motion(wxMouseEvent& evt)
     // Handle middle-mouse pan dragging
     if (m_pan_start.has_value()) {
         wxPoint current_pos = evt.GetPosition();
-        wxSize sz = m_canvas->GetClientSize();
-        double inner_w = std::max(1.0, static_cast<double>(sz.x - 2 * CANVAS_PAD));
-        double inner_h = std::max(1.0, static_cast<double>(sz.y - 2 * CANVAS_PAD));
-        
-        double visible_w = m_plate_w_mm / m_zoom_factor;
-        double visible_h = m_plate_h_mm / m_zoom_factor;
-        
+        const DrawTransform pan_t = get_draw_transform();
         int dx = current_pos.x - m_pan_start->x;
         int dy = current_pos.y - m_pan_start->y;
-        
-        m_pan_offset.x() = m_pan_start_offset.x() - (dx / inner_w) * visible_w;
-        m_pan_offset.y() = m_pan_start_offset.y() + (dy / inner_h) * visible_h;
+
+        if (pan_t.scale > 0) {
+            m_pan_offset.x() = m_pan_start_offset.x() - dx / pan_t.scale;
+            m_pan_offset.y() = m_pan_start_offset.y() + dy / pan_t.scale;
+        }
         
         m_pan_offset = draw_clamp_pan_offset(m_pan_offset, m_plate_w_mm, m_plate_h_mm, m_zoom_factor);
         

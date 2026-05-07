@@ -134,6 +134,19 @@ private:
     std::vector<std::unique_ptr<DrawCommand>> m_undo_stack;
     std::vector<std::unique_ptr<DrawCommand>> m_redo_stack;
 
+    // Uniform coordinate transform: maintains 1:1 aspect ratio (square grid cells).
+    // Computed from the current canvas size, plate dimensions, zoom and pan.
+    struct DrawTransform {
+        double scale    { 0.0 }; // pixels per mm (same for X and Y)
+        double draw_x0  { 0.0 }; // canvas X of the plate's left edge
+        double draw_y0  { 0.0 }; // canvas Y of the plate's top edge
+        double draw_w   { 0.0 }; // drawing area width in pixels
+        double draw_h   { 0.0 }; // drawing area height in pixels
+        double visible_w{ 0.0 }; // visible plate extent in X (mm)
+        double visible_h{ 0.0 }; // visible plate extent in Y (mm)
+    };
+    DrawTransform get_draw_transform() const;
+
     // Helpers
     void update_banner();
     void update_layer_label();
