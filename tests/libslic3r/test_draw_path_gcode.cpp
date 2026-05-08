@@ -3,6 +3,8 @@
 #include "libslic3r/DrawSession.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
+#include <optional>
+
 using namespace Slic3r;
 
 // Build a minimal merged DynamicPrintConfig with the keys DrawPathGCodeGenerator needs.
@@ -274,6 +276,74 @@ TEST_CASE("DrawPathGCodeGenerator: travel segment produces G0 without extruding 
     }
     REQUIRE(has_g1_without_e);    // travel emits G1 without E
     REQUIRE(!has_g1_e);           // with zero retraction, no E moves at all
+}
+
+// ---------------------------------------------------------------------------
+// TASK: Centered-coord workflow — 15×15mm box stays on the build plate
+// ---------------------------------------------------------------------------
+TEST_CASE("DrawPathGCodeGenerator: centered 15x15mm box with half-width offset stays on plate",
+    "[DrawPathGCodeGenerator]")
+{
+    // Reproduce the exact workflow:
+    //   1. User draws a 15×15mm square centred on the draw canvas (±7.5mm).
+    //   2. apply_session_to_model() sets instance offset = (half_w, half_h) = (10, 10).
+    //   3. GCode generator receives plate_origin=(0,0) and instance_offset=(10,10).
+    //   4. Every G-code XY coordinate must be positive and within 0..20mm.
+
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+
+    DrawSession session;
+    session.add_layer(0.2);
+    DrawLayer& layer = session.layers.back();
+    layer.segments.push_back({ Vec2d(-7.5, -7.5), Vec2d( 7.5, -7.5), false });
+    layer.segments.push_back({ Vec2d( 7.5, -7.5), Vec2d( 7.5,  7.5), false });
+    layer.segments.push_back({ Vec2d( 7.5,  7.5), Vec2d(-7.5,  7.5), false });
+    layer.segments.push_back({ Vec2d(-7.5,  7.5), Vec2d(-7.5, -7.5), false });
+
+    // Plate at world origin; instance offset = half of the 20mm work area.
+    const Vec2d plate_origin(0.0, 0.0);
+    const Vec2d instance_offset(10.0, 10.0);
+
+    DrawPathGCodeGenerator gen(cfg, plate_origin);
+    const std::string gcode = gen.generate(session, instance_offset);
+
+    REQUIRE_FALSE(gcode.empty());
+
+    // Parse every G1 line that moves in XY and verify the coordinates are
+    // within the expected on-plate range [2.3, 17.7] mm (7.5 ± 0.2 nozzle radius + 10 offset).
+    bool found_xy = false;
+    std::size_t pos = 0;
+    while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
+        std::size_t line_end = gcode.find('\n', pos);
+        if (line_end == std::string::npos) line_end = gcode.size();
+        const std::string line = gcode.substr(pos, line_end - pos);
+
+        auto extract = [&](char axis) -> std::optional<double> {
+            const std::string token = std::string(" ") + axis;
+            auto ap = line.find(token);
+            if (ap == std::string::npos) return std::nullopt;
+            return std::stod(line.substr(ap + 2));
+        };
+
+        auto xv = extract('X');
+        auto yv = extract('Y');
+
+        if (xv) {
+            found_xy = true;
+            REQUIRE(*xv >= 2.0);   // must not be before plate start
+            REQUIRE(*xv <= 18.0);  // must not exceed work area
+        }
+        if (yv) {
+            found_xy = true;
+            REQUIRE(*yv >= 2.0);
+            REQUIRE(*yv <= 18.0);
+        }
+
+        pos = line_end + 1;
+    }
+    // At least some XY moves must have been emitted.
+    REQUIRE(found_xy);
 }
 
 TEST_CASE("DrawPathGCodeGenerator: plate_origin shifts all XY coordinates", "[DrawPathGCodeGenerator]")

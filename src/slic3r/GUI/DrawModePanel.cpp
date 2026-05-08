@@ -1193,10 +1193,16 @@ bool DrawModePanel::apply_session_to_model(bool reset_after)
         obj->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
         obj->draw_session = std::make_unique<DrawSession>(m_session);
 
-        // Instance offset: segments are in plate-relative coords,
-        // so place the object at the plate's world origin.
+        // Draw canvas uses centered coordinates: the draw origin (0,0) sits at
+        // the centre of the 20×20 mm work area, not at the plate's bottom-left
+        // corner.  The GCode generator formula is:
+        //   abs_XY = plate_origin + instance_offset + segment_coord
+        // so instance_offset must shift the draw-canvas centre to the work-area
+        // centre, i.e. (half_w, half_h) relative to the plate origin.
         ModelInstance* inst = obj->add_instance();
-        inst->set_offset(Vec3d(m_plate_x, m_plate_y, 0.0));
+        inst->set_offset(Vec3d(m_plate_x + m_plate_w_mm * 0.5,
+                               m_plate_y + m_plate_h_mm * 0.5,
+                               0.0));
 
         // Track the new object so a subsequent simulate/finalize updates it in-place.
         if (!reset_after)
