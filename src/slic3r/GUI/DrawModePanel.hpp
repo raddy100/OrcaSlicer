@@ -203,6 +203,8 @@ private:
 
     // Keyboard hook (Ctrl+Z / Ctrl+Y)
     void on_char_hook(wxKeyEvent& evt);
+    // Key-up hook: re-evaluate snap mode when modifier keys are released mid-draft
+    void on_key_up(wxKeyEvent& evt);
 
     // Shared finalize logic: create/update the ModelObject on the plate.
     // When reset_after is true (Finalize), the panel state is cleared afterwards.

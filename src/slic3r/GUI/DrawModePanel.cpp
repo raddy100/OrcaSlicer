@@ -132,6 +132,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_simulate_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_simulate,    this);
     m_finalize_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_finalize,    this);
     Bind(wxEVT_CHAR_HOOK,                &DrawModePanel::on_char_hook,   this);
+    Bind(wxEVT_KEY_UP,                   &DrawModePanel::on_key_up,      this);
 
     // Canvas events
     m_canvas->Bind(wxEVT_PAINT,       &DrawModePanel::on_canvas_paint,      this);
@@ -1337,6 +1338,22 @@ void DrawModePanel::on_char_hook(wxKeyEvent& evt)
         }
     }
     evt.Skip();
+}
+
+void DrawModePanel::on_key_up(wxKeyEvent& evt)
+{
+    evt.Skip();
+    if (!IsShownOnScreen()) return;
+
+    // When a modifier key (Ctrl/Alt) is released, re-evaluate the snap mode so
+    // the rubber-band line immediately returns to Cardinal instead of staying
+    // locked in Diagonal45 until the mouse moves again.
+    const int kc = evt.GetKeyCode();
+    if ((kc == WXK_CONTROL || kc == WXK_ALT) &&
+        m_input_mode == DrawInputMode::Drawing && m_pending_start && m_draft.active) {
+        update_draft(m_draft.raw_mouse, evt.ControlDown(), evt.AltDown());
+        if (m_canvas) m_canvas->Refresh(false);
+    }
 }
 
 void DrawModePanel::on_fill_toggle(wxCommandEvent&)
