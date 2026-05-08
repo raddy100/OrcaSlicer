@@ -48,12 +48,13 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_snap_toggle = new wxToggleButton(this, wxID_ANY, "Snap");
     {
         const wxString grid_choices[] = {
+            "0.05 mm",
             "0.1 mm", "0.2 mm", "0.3 mm", "0.4 mm", "0.5 mm",
             "0.6 mm", "0.7 mm", "0.8 mm", "0.9 mm", "1.0 mm"
         };
         m_grid_res_choice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxSize(72, -1),
-            10, grid_choices);
-        m_grid_res_choice->SetSelection(3); // default: 0.4 mm
+            11, grid_choices);
+        m_grid_res_choice->SetSelection(4); // default: 0.4 mm
         m_grid_res_choice->SetToolTip("Snap-to-grid resolution");
     }
     m_measure_toggle = new wxToggleButton(this, wxID_ANY, "Show Measurements");
@@ -1208,7 +1209,7 @@ void DrawModePanel::on_snap_toggle(wxCommandEvent&)
 void DrawModePanel::on_grid_res_change(wxCommandEvent&)
 {
     static const double k_spacings[] = {
-        0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
+        0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
     };
     const int sel = m_grid_res_choice->GetSelection();
     if (sel >= 0 && sel < static_cast<int>(sizeof(k_spacings) / sizeof(k_spacings[0])))
