@@ -571,7 +571,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
 
         // 1mm positions, skipping 5mm multiples and origin (±1, ±2, ±3, ±4, ±6…)
         if (show_1mm) {
-            dc.SetPen(wxPen(wxColour(84, 84, 84), 1));
+            dc.SetPen(wxPen(wxColour(84, 84, 84), 2));
             for (int i = -10; i <= 10; ++i) {
                 if (i == 0 || i % 5 == 0) continue;
                 const double pos = static_cast<double>(i);
@@ -585,7 +585,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         }
 
         // 5mm lines (±5 from origin; ±10 = plate edge, already shown by border)
-        dc.SetPen(wxPen(wxColour(90, 90, 90), 1));
+        dc.SetPen(wxPen(wxColour(90, 90, 90), 3));
         for (int sign = -1; sign <= 1; sign += 2) {
             const double pos = sign * 5.0;
             const wxPoint pv = plate_to_screen(Vec2d(pos, -half_h));
