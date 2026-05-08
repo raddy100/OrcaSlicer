@@ -12,6 +12,7 @@ add_executable(${_TEST_NAME}_tests
     test_preset_bundle_loading.cpp
     test_draw_session.cpp
     test_draw_mode_feedback.cpp
+    test_draw_path_mesh.cpp
     test_draw_path_gcode.cpp
     test_elephant_foot_compensation.cpp
     test_geometry.cpp

@@ -162,6 +162,53 @@ TEST_CASE("DrawPathGCodeGenerator: single extrusion segment produces exactly one
     REQUIRE(count == 1);
 }
 
+TEST_CASE("DrawPathGCodeGenerator: connected extrusion segments stay continuous at shared endpoints",
+    "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+
+    DrawSession session;
+    session.add_layer(0.2);
+    DrawLayer& layer = session.layers.back();
+    layer.segments.push_back({ Vec2d(10.0, 10.0), Vec2d(20.0, 10.0), false });
+    layer.segments.push_back({ Vec2d(20.0, 10.0), Vec2d(20.0, 20.0), false });
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    bool seen_first_extrusion = false;
+    bool checked_join = false;
+    double previous_e = 0.0;
+
+    std::size_t pos = 0;
+    while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
+        std::size_t line_end = gcode.find('\n', pos);
+        if (line_end == std::string::npos)
+            line_end = gcode.size();
+
+        const auto e_pos = gcode.find(" E", pos);
+        if (e_pos != std::string::npos && e_pos < line_end) {
+            const std::size_t val_start = e_pos + 2;
+            const double e = std::stod(gcode.substr(val_start, gcode.find_first_of(" \n\r", val_start) - val_start));
+            if (e > previous_e + 1e-9) {
+                if (seen_first_extrusion) {
+                    checked_join = true;
+                    break;
+                }
+                seen_first_extrusion = true;
+            }
+            previous_e = e;
+        } else if (seen_first_extrusion) {
+            FAIL("Inserted a travel move between connected extrusion segments");
+        }
+
+        pos = line_end + 1;
+    }
+
+    REQUIRE(checked_join);
+}
+
 TEST_CASE("DrawPathGCodeGenerator: Z values are strictly non-decreasing", "[DrawPathGCodeGenerator]")
 {
     DynamicPrintConfig cfg = make_test_config();

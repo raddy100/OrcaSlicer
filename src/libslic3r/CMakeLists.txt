@@ -109,6 +109,8 @@ set(lisbslic3r_sources
     DrawSession.hpp
     DrawModeFeedback.cpp
     DrawModeFeedback.hpp
+    DrawPathMesh.cpp
+    DrawPathMesh.hpp
     DrawPathGCodeGenerator.cpp
     DrawPathGCodeGenerator.hpp
     EdgeGrid.cpp

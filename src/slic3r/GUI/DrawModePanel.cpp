@@ -6,6 +6,7 @@
 #include "GUI_ObjectList.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/DrawModeFeedback.hpp"
+#include "libslic3r/DrawPathMesh.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Config.hpp"
@@ -938,73 +939,6 @@ void DrawModePanel::on_clear_layer(wxCommandEvent&)
     if (active < 0 || active >= m_session.layer_count()) return;
     dispatch_command(std::make_unique<ClearLayerCommand>(active));
     reset_draft(false);
-}
-
-// Build a TriangleMesh that visually represents the drawn paths as flat
-// rectangular prisms: width = nozzle_diameter, height = layer_height.
-// Each DrawSegment becomes one box oriented along the segment direction.
-static TriangleMesh make_draw_path_mesh(const DrawSession& session, double nozzle_d)
-{
-    std::vector<Vec3f>   verts;
-    std::vector<Vec3i32> faces;
-
-    for (const DrawLayer& layer : session.layers) {
-        const float zb  = static_cast<float>(layer.z_start);
-        const float zt  = static_cast<float>(layer.z_end);
-        const float hw  = static_cast<float>(nozzle_d / 2.0);
-
-        for (const DrawSegment& seg : layer.segments) {
-            Vec2d d   = seg.end - seg.start;
-            double len = d.norm();
-            if (len < 1e-6) continue;
-
-            Vec2d dir  = d / len;
-            // 2-D perpendicular (rotated 90° CCW)
-            Vec2d perp(-dir.y(), dir.x());
-
-            float ax = static_cast<float>(seg.start.x());
-            float ay = static_cast<float>(seg.start.y());
-            float bx = static_cast<float>(seg.end.x());
-            float by = static_cast<float>(seg.end.y());
-            float px = static_cast<float>(perp.x() * nozzle_d / 2.0);
-            float py = static_cast<float>(perp.y() * nozzle_d / 2.0);
-
-            // 8 vertices of the rectangular prism
-            // Bottom ring (z = zb): v0..v3, Top ring (z = zt): v4..v7
-            const int b = static_cast<int>(verts.size());
-            verts.emplace_back(ax - px, ay - py, zb); // b+0 start-left  bot
-            verts.emplace_back(ax + px, ay + py, zb); // b+1 start-right bot
-            verts.emplace_back(bx + px, by + py, zb); // b+2 end-right   bot
-            verts.emplace_back(bx - px, by - py, zb); // b+3 end-left    bot
-            verts.emplace_back(ax - px, ay - py, zt); // b+4 start-left  top
-            verts.emplace_back(ax + px, ay + py, zt); // b+5 start-right top
-            verts.emplace_back(bx + px, by + py, zt); // b+6 end-right   top
-            verts.emplace_back(bx - px, by - py, zt); // b+7 end-left    top
-
-            // 12 triangles  -  winding gives outward normals (right-hand rule)
-            // Bottom face (-Z normal)
-            faces.emplace_back(b+0, b+1, b+2);
-            faces.emplace_back(b+0, b+2, b+3);
-            // Top face (+Z normal)
-            faces.emplace_back(b+4, b+6, b+5);
-            faces.emplace_back(b+4, b+7, b+6);
-            // Start cap (-dir normal)
-            faces.emplace_back(b+0, b+4, b+5);
-            faces.emplace_back(b+0, b+5, b+1);
-            // End cap (+dir normal)
-            faces.emplace_back(b+2, b+6, b+3);
-            faces.emplace_back(b+3, b+6, b+7);
-            // Right side (+perp normal)
-            faces.emplace_back(b+1, b+5, b+2);
-            faces.emplace_back(b+2, b+5, b+6);
-            // Left side (-perp normal)
-            faces.emplace_back(b+0, b+3, b+7);
-            faces.emplace_back(b+0, b+7, b+4);
-        }
-    }
-
-    if (verts.empty()) return TriangleMesh();
-    return TriangleMesh(verts, faces);
 }
 
 bool DrawModePanel::apply_session_to_model(bool reset_after)
