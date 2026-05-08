@@ -42,6 +42,7 @@ Deliver code that is:
    - Test edge cases manually if needed
    - Verify code integrates properly with existing functionality
    - Check that all tests pass before committing
+   - compile the libraries and projects where the changes were made to make sure it builds correctly
 
 **Your Decision-Making Framework:**
 - Prioritize correctness and testability over cleverness
