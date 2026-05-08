@@ -28,6 +28,7 @@ constexpr double DRAW_MODE_DEFAULT_ZOOM_FACTOR   = 1.0;
 constexpr double DRAW_MODE_MIN_ZOOM_FACTOR       = 0.5;
 constexpr double DRAW_MODE_MAX_ZOOM_FACTOR       = 10.0;
 constexpr double DRAW_MODE_SCALE_GRID_MM         = 10.0;
+constexpr double DRAW_MODE_WORK_AREA_MM          = 20.0; // fixed canvas size (mm)
 
 double draw_segment_length_mm(const Vec2d& start, const Vec2d& end);
 double draw_segment_absolute_angle_degrees(const Vec2d& start, const Vec2d& end);

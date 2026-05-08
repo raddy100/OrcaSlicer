@@ -570,6 +570,84 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         }
     }
 
+    // Ruler tick marks along all four plate edges.
+    // Integer-indexed loop avoids floating-point drift over 200 iterations.
+    // Tick heights (pointing inward):  0.1mm→3px  0.5mm→5px  1mm→8px  5mm→12px+label
+    {
+        const double px_per_mm = dt.scale;
+        const bool show_01 = (px_per_mm * 0.1 >= 2.0);
+        const bool show_05 = (px_per_mm * 0.5 >= 2.0);
+
+        dc.SetFont(wxFont(7, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL));
+        dc.SetTextForeground(wxColour(160, 160, 160));
+        dc.SetPen(wxPen(wxColour(130, 130, 130), 1));
+
+        // Returns tick height in pixels for the i-th 0.1mm step; 0 = skip.
+        auto tick_h = [&](int i) -> int {
+            if (i % 50 == 0)            return 12; // 5 mm
+            if (i % 10 == 0)            return  8; // 1 mm
+            if (i % 5  == 0 && show_05) return  5; // 0.5 mm
+            if (               show_01) return  3; // 0.1 mm
+            return 0;
+        };
+
+        // ── Bottom edge (plate Y = 0) — ticks point upward ───────────────────
+        const int n_x  = static_cast<int>(std::round(m_plate_w_mm / 0.1));
+        const int bot  = dry + drh;
+        for (int i = 0; i <= n_x; ++i) {
+            const int th = tick_h(i);
+            if (th == 0) continue;
+            const double rx = i * 0.1;
+            const wxPoint p = plate_to_screen(Vec2d(rx, 0.0));
+            if (p.x < drx || p.x > drx + drw) continue;
+            dc.DrawLine(p.x, bot, p.x, bot - th);
+            if (i % 50 == 0) { // 5mm label, inside plate just above tick
+                wxString lbl = wxString::Format("%.0f", rx);
+                wxSize ts = dc.GetTextExtent(lbl);
+                dc.DrawText(lbl, p.x - ts.x / 2, bot - th - ts.y - 1);
+            }
+        }
+
+        // ── Top edge (plate Y = m_plate_h_mm) — ticks point downward ─────────
+        const int top_y = dry;
+        for (int i = 0; i <= n_x; ++i) {
+            const int th = tick_h(i);
+            if (th == 0) continue;
+            const double rx = i * 0.1;
+            const wxPoint p = plate_to_screen(Vec2d(rx, m_plate_h_mm));
+            if (p.x < drx || p.x > drx + drw) continue;
+            dc.DrawLine(p.x, top_y, p.x, top_y + th);
+        }
+
+        // ── Left edge (plate X = 0) — ticks point rightward ──────────────────
+        const int n_y  = static_cast<int>(std::round(m_plate_h_mm / 0.1));
+        const int lft  = drx;
+        for (int i = 0; i <= n_y; ++i) {
+            const int th = tick_h(i);
+            if (th == 0) continue;
+            const double ry = i * 0.1;
+            const wxPoint p = plate_to_screen(Vec2d(0.0, ry));
+            if (p.y < dry || p.y > dry + drh) continue;
+            dc.DrawLine(lft, p.y, lft + th, p.y);
+            if (i % 50 == 0) { // 5mm label, inside plate just right of tick
+                wxString lbl = wxString::Format("%.0f", ry);
+                wxSize ts = dc.GetTextExtent(lbl);
+                dc.DrawText(lbl, lft + th + 2, p.y - ts.y / 2);
+            }
+        }
+
+        // ── Right edge (plate X = m_plate_w_mm) — ticks point leftward ───────
+        const int rgt  = drx + drw;
+        for (int i = 0; i <= n_y; ++i) {
+            const int th = tick_h(i);
+            if (th == 0) continue;
+            const double ry = i * 0.1;
+            const wxPoint p = plate_to_screen(Vec2d(m_plate_w_mm, ry));
+            if (p.y < dry || p.y > dry + drh) continue;
+            dc.DrawLine(rgt, p.y, rgt - th, p.y);
+        }
+    }
+
     // No-layers message
     if (m_session.layer_count() == 0) {
         dc.SetTextForeground(wxColour(160, 160, 160));

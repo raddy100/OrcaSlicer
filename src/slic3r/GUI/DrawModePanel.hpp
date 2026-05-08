@@ -92,8 +92,8 @@ private:
     // 2-D canvas state
     std::optional<Vec2d> m_pending_start;       // first click waiting for second
     Vec2d                m_mouse_plate { 0.0, 0.0 }; // current mouse in plate-mm
-    double               m_plate_w_mm  { 256.0 };
-    double               m_plate_h_mm  { 256.0 };
+    double               m_plate_w_mm  { DRAW_MODE_WORK_AREA_MM };
+    double               m_plate_h_mm  { DRAW_MODE_WORK_AREA_MM };
 
     // Zoom and pan state
     double               m_zoom_factor { DRAW_MODE_DEFAULT_ZOOM_FACTOR }; // 1.0 = fit plate, >1.0 = zoomed in
