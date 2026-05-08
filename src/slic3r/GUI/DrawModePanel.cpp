@@ -391,9 +391,12 @@ Vec2d DrawModePanel::screen_to_plate(wxPoint pt) const
     const DrawTransform t = get_draw_transform();
     if (t.scale <= 0) return Vec2d(0.0, 0.0);
 
-    double px = (pt.x - t.draw_x0) / t.scale + m_pan_offset.x();
+    // Plate origin is at the canvas centre; coords run -half_w..+half_w and -half_h..+half_h.
+    const double half_w = m_plate_w_mm * 0.5;
+    const double half_h = m_plate_h_mm * 0.5;
+    double px = -half_w + m_pan_offset.x() + (pt.x - t.draw_x0) / t.scale;
     // Screen Y grows downward; plate Y grows upward.
-    double py = (t.draw_h - (pt.y - t.draw_y0)) / t.scale + m_pan_offset.y();
+    double py = -half_h + m_pan_offset.y() + (t.draw_h - (pt.y - t.draw_y0)) / t.scale;
     return Vec2d(px, py);
 }
 
@@ -402,8 +405,11 @@ wxPoint DrawModePanel::plate_to_screen(Vec2d pt) const
     if (!m_canvas) return wxPoint(0, 0);
     const DrawTransform t = get_draw_transform();
 
-    int sx = static_cast<int>(t.draw_x0 + (pt.x() - m_pan_offset.x()) * t.scale);
-    int sy = static_cast<int>(t.draw_y0 + (t.visible_h - (pt.y() - m_pan_offset.y())) * t.scale);
+    // Inverse of screen_to_plate: plate centre (0,0) maps to the canvas centre.
+    const double half_w = m_plate_w_mm * 0.5;
+    const double half_h = m_plate_h_mm * 0.5;
+    int sx = static_cast<int>(t.draw_x0 + (pt.x() + half_w - m_pan_offset.x()) * t.scale);
+    int sy = static_cast<int>(t.draw_y0 + (t.visible_h - (pt.y() + half_h - m_pan_offset.y())) * t.scale);
     return wxPoint(sx, sy);
 }
 
@@ -536,15 +542,18 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
     dc.SetBrush(wxBrush(wxColour(45, 45, 45)));
     dc.DrawRectangle(drx, dry, drw, drh);
 
-    // Subtle grid every 10 mm — clipped to the drawing rect
-    dc.SetPen(wxPen(wxColour(60, 60, 60), 1, wxPENSTYLE_DOT));
-    for (double x = 10.0; x < m_plate_w_mm; x += 10.0) {
-        wxPoint p1 = plate_to_screen(Vec2d(x, 0.0));
-        dc.DrawLine(p1.x, dry, p1.x, dry + drh);
-    }
-    for (double y = 10.0; y < m_plate_h_mm; y += 10.0) {
-        wxPoint p1 = plate_to_screen(Vec2d(0.0, y));
-        dc.DrawLine(drx, p1.y, drx + drw, p1.y);
+    // Centre-axis lines at X=0 (Y-axis) and Y=0 (X-axis) — clipped to the drawing rect.
+    // Plate coords run from -half to +half in each axis; axes cross at (0,0).
+    {
+        const double half_w = m_plate_w_mm * 0.5;
+        const double half_h = m_plate_h_mm * 0.5;
+        dc.SetPen(wxPen(wxColour(60, 60, 60), 1, wxPENSTYLE_DOT));
+        // Y-axis (X=0)
+        const wxPoint py_axis = plate_to_screen(Vec2d(0.0, -half_h));
+        dc.DrawLine(py_axis.x, dry, py_axis.x, dry + drh);
+        // X-axis (Y=0)
+        const wxPoint px_axis = plate_to_screen(Vec2d(-half_w, 0.0));
+        dc.DrawLine(drx, px_axis.y, drx + drw, px_axis.y);
     }
 
     // Minor snap-grid dots at the selected grid spacing.
@@ -554,14 +563,17 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         if (dot_spacing_px >= 6.0) {
             dc.SetPen(wxPen(wxColour(72, 72, 72), 1));
             const double g         = m_grid_spacing;
-            const double x_vis_min = m_pan_offset.x();
-            const double x_vis_max = m_pan_offset.x() + dt.visible_w;
-            const double y_vis_min = m_pan_offset.y();
-            const double y_vis_max = m_pan_offset.y() + dt.visible_h;
-            const double x_start   = std::ceil(std::max(0.0, x_vis_min) / g) * g;
-            const double y_start   = std::ceil(std::max(0.0, y_vis_min) / g) * g;
-            for (double gx = x_start; gx <= std::min(m_plate_w_mm, x_vis_max); gx += g) {
-                for (double gy = y_start; gy <= std::min(m_plate_h_mm, y_vis_max); gy += g) {
+            const double half_w    = m_plate_w_mm * 0.5;
+            const double half_h    = m_plate_h_mm * 0.5;
+            // Compute visible plate region in centred coords.
+            const double x_vis_min = -half_w + m_pan_offset.x();
+            const double x_vis_max = -half_w + m_pan_offset.x() + dt.visible_w;
+            const double y_vis_min = -half_h + m_pan_offset.y();
+            const double y_vis_max = -half_h + m_pan_offset.y() + dt.visible_h;
+            const double x_start   = std::ceil(std::max(-half_w, x_vis_min) / g) * g;
+            const double y_start   = std::ceil(std::max(-half_h, y_vis_min) / g) * g;
+            for (double gx = x_start; gx <= std::min(half_w, x_vis_max); gx += g) {
+                for (double gy = y_start; gy <= std::min(half_h, y_vis_max); gy += g) {
                     wxPoint p = plate_to_screen(Vec2d(gx, gy));
                     if (p.x >= drx && p.x <= drx + drw && p.y >= dry && p.y <= dry + drh)
                         dc.DrawPoint(p.x, p.y);
@@ -571,34 +583,41 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
     }
 
     // Ruler tick marks along all four plate edges.
-    // Integer-indexed loop avoids floating-point drift over 200 iterations.
+    // Plate coords are centred: X and Y each run from -half to +half.
+    // Integer-indexed loop (step 0.1 mm) avoids floating-point drift.
     // Tick heights (pointing inward):  0.1mm→3px  0.5mm→5px  1mm→8px  5mm→12px+label
     {
         const double px_per_mm = dt.scale;
         const bool show_01 = (px_per_mm * 0.1 >= 2.0);
         const bool show_05 = (px_per_mm * 0.5 >= 2.0);
+        const double half_w = m_plate_w_mm * 0.5;
+        const double half_h = m_plate_h_mm * 0.5;
 
         dc.SetFont(wxFont(7, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL));
         dc.SetTextForeground(wxColour(160, 160, 160));
         dc.SetPen(wxPen(wxColour(130, 130, 130), 1));
 
         // Returns tick height in pixels for the i-th 0.1mm step; 0 = skip.
+        // i ranges from -n_half to +n_half; multiples-of-50 → 5mm marks.
         auto tick_h = [&](int i) -> int {
-            if (i % 50 == 0)            return 12; // 5 mm
+            if (i % 50 == 0)            return 12; // 5 mm (includes -50, 0, 50, etc.)
             if (i % 10 == 0)            return  8; // 1 mm
             if (i % 5  == 0 && show_05) return  5; // 0.5 mm
             if (               show_01) return  3; // 0.1 mm
             return 0;
         };
 
-        // ── Bottom edge (plate Y = 0) — ticks point upward ───────────────────
-        const int n_x  = static_cast<int>(std::round(m_plate_w_mm / 0.1));
-        const int bot  = dry + drh;
-        for (int i = 0; i <= n_x; ++i) {
+        // n_half steps cover one half of the axis (0.1mm resolution, so 100 for 10mm).
+        const int n_x_half = static_cast<int>(std::round(half_w / 0.1));
+        const int n_y_half = static_cast<int>(std::round(half_h / 0.1));
+
+        // ── Bottom edge (plate Y = -half_h) — ticks point upward ─────────────
+        const int bot = dry + drh;
+        for (int i = -n_x_half; i <= n_x_half; ++i) {
             const int th = tick_h(i);
             if (th == 0) continue;
             const double rx = i * 0.1;
-            const wxPoint p = plate_to_screen(Vec2d(rx, 0.0));
+            const wxPoint p = plate_to_screen(Vec2d(rx, -half_h));
             if (p.x < drx || p.x > drx + drw) continue;
             dc.DrawLine(p.x, bot, p.x, bot - th);
             if (i % 50 == 0) { // 5mm label, inside plate just above tick
@@ -608,25 +627,24 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
             }
         }
 
-        // ── Top edge (plate Y = m_plate_h_mm) — ticks point downward ─────────
+        // ── Top edge (plate Y = +half_h) — ticks point downward ──────────────
         const int top_y = dry;
-        for (int i = 0; i <= n_x; ++i) {
+        for (int i = -n_x_half; i <= n_x_half; ++i) {
             const int th = tick_h(i);
             if (th == 0) continue;
             const double rx = i * 0.1;
-            const wxPoint p = plate_to_screen(Vec2d(rx, m_plate_h_mm));
+            const wxPoint p = plate_to_screen(Vec2d(rx, half_h));
             if (p.x < drx || p.x > drx + drw) continue;
             dc.DrawLine(p.x, top_y, p.x, top_y + th);
         }
 
-        // ── Left edge (plate X = 0) — ticks point rightward ──────────────────
-        const int n_y  = static_cast<int>(std::round(m_plate_h_mm / 0.1));
-        const int lft  = drx;
-        for (int i = 0; i <= n_y; ++i) {
+        // ── Left edge (plate X = -half_w) — ticks point rightward ────────────
+        const int lft = drx;
+        for (int i = -n_y_half; i <= n_y_half; ++i) {
             const int th = tick_h(i);
             if (th == 0) continue;
             const double ry = i * 0.1;
-            const wxPoint p = plate_to_screen(Vec2d(0.0, ry));
+            const wxPoint p = plate_to_screen(Vec2d(-half_w, ry));
             if (p.y < dry || p.y > dry + drh) continue;
             dc.DrawLine(lft, p.y, lft + th, p.y);
             if (i % 50 == 0) { // 5mm label, inside plate just right of tick
@@ -636,13 +654,13 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
             }
         }
 
-        // ── Right edge (plate X = m_plate_w_mm) — ticks point leftward ───────
-        const int rgt  = drx + drw;
-        for (int i = 0; i <= n_y; ++i) {
+        // ── Right edge (plate X = +half_w) — ticks point leftward ───────────
+        const int rgt = drx + drw;
+        for (int i = -n_y_half; i <= n_y_half; ++i) {
             const int th = tick_h(i);
             if (th == 0) continue;
             const double ry = i * 0.1;
-            const wxPoint p = plate_to_screen(Vec2d(m_plate_w_mm, ry));
+            const wxPoint p = plate_to_screen(Vec2d(half_w, ry));
             if (p.y < dry || p.y > dry + drh) continue;
             dc.DrawLine(rgt, p.y, rgt - th, p.y);
         }
