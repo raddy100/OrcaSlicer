@@ -18,6 +18,7 @@
 #include <wx/textctrl.h>
 #include <wx/msgdlg.h>
 #include <wx/dcbuffer.h>
+#include <wx/choice.h>
 
 #include <algorithm>
 #include <cmath>
@@ -45,6 +46,16 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_edit_toggle = new wxToggleButton(this, wxID_ANY, "Edit");
     m_fill_toggle = new wxToggleButton(this, wxID_ANY, "Fill Width");
     m_snap_toggle = new wxToggleButton(this, wxID_ANY, "Snap");
+    {
+        const wxString grid_choices[] = {
+            "0.1 mm", "0.2 mm", "0.3 mm", "0.4 mm", "0.5 mm",
+            "0.6 mm", "0.7 mm", "0.8 mm", "0.9 mm", "1.0 mm"
+        };
+        m_grid_res_choice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxSize(72, -1),
+            10, grid_choices);
+        m_grid_res_choice->SetSelection(3); // default: 0.4 mm
+        m_grid_res_choice->SetToolTip("Snap-to-grid resolution");
+    }
     m_measure_toggle = new wxToggleButton(this, wxID_ANY, "Show Measurements");
     m_coord_toggle = new wxToggleButton(this, wxID_ANY, "Show Coordinates");
     m_length_input = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(90, -1), wxTE_PROCESS_ENTER);
@@ -77,6 +88,8 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     top_sizer->Add(m_edit_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_fill_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_snap_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(new wxStaticText(this, wxID_ANY, "Grid:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_grid_res_choice, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_measure_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_coord_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(new wxStaticText(this, wxID_ANY, "Length:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
@@ -105,6 +118,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_edit_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_edit_toggle, this);
     m_fill_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_fill_toggle, this);
     m_snap_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_snap_toggle, this);
+    m_grid_res_choice->Bind(wxEVT_CHOICE, &DrawModePanel::on_grid_res_change, this);
     m_measure_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_measure_toggle, this);
     m_coord_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_coord_toggle, this);
     m_length_input->Bind(wxEVT_TEXT, &DrawModePanel::on_length_text, this);
@@ -394,8 +408,8 @@ wxPoint DrawModePanel::plate_to_screen(Vec2d pt) const
 
 Vec2d DrawModePanel::snap_pos(Vec2d pt) const
 {
-    if (!m_snap_to_grid || m_nozzle_d < 1e-6) return pt;
-    const double g = m_nozzle_d;
+    if (!m_snap_to_grid || m_grid_spacing < 1e-6) return pt;
+    const double g = m_grid_spacing;
     return Vec2d(std::round(pt.x() / g) * g,
                  std::round(pt.y() / g) * g);
 }
@@ -530,6 +544,29 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
     for (double y = 10.0; y < m_plate_h_mm; y += 10.0) {
         wxPoint p1 = plate_to_screen(Vec2d(0.0, y));
         dc.DrawLine(drx, p1.y, drx + drw, p1.y);
+    }
+
+    // Minor snap-grid dots at the selected grid spacing.
+    // Only rendered when snap is on and cells are large enough to be legible (>=6 px).
+    if (m_snap_to_grid && m_grid_spacing > 0.0) {
+        const double dot_spacing_px = dt.scale * m_grid_spacing;
+        if (dot_spacing_px >= 6.0) {
+            dc.SetPen(wxPen(wxColour(72, 72, 72), 1));
+            const double g         = m_grid_spacing;
+            const double x_vis_min = m_pan_offset.x();
+            const double x_vis_max = m_pan_offset.x() + dt.visible_w;
+            const double y_vis_min = m_pan_offset.y();
+            const double y_vis_max = m_pan_offset.y() + dt.visible_h;
+            const double x_start   = std::ceil(std::max(0.0, x_vis_min) / g) * g;
+            const double y_start   = std::ceil(std::max(0.0, y_vis_min) / g) * g;
+            for (double gx = x_start; gx <= std::min(m_plate_w_mm, x_vis_max); gx += g) {
+                for (double gy = y_start; gy <= std::min(m_plate_h_mm, y_vis_max); gy += g) {
+                    wxPoint p = plate_to_screen(Vec2d(gx, gy));
+                    if (p.x >= drx && p.x <= drx + drw && p.y >= dry && p.y <= dry + drh)
+                        dc.DrawPoint(p.x, p.y);
+                }
+            }
+        }
     }
 
     // No-layers message
@@ -1164,6 +1201,21 @@ void DrawModePanel::on_snap_toggle(wxCommandEvent&)
     m_mouse_plate = snap_pos(m_mouse_plate);
     const bool diagonal_snap = m_draft.snap_mode == DrawDirectionSnapMode::Diagonal45;
     const bool free_snap = m_draft.snap_mode == DrawDirectionSnapMode::Free;
+    update_draft(m_draft.raw_mouse, diagonal_snap, free_snap);
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_grid_res_change(wxCommandEvent&)
+{
+    static const double k_spacings[] = {
+        0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
+    };
+    const int sel = m_grid_res_choice->GetSelection();
+    if (sel >= 0 && sel < static_cast<int>(sizeof(k_spacings) / sizeof(k_spacings[0])))
+        m_grid_spacing = k_spacings[sel];
+    m_mouse_plate = snap_pos(m_mouse_plate);
+    const bool diagonal_snap = m_draft.snap_mode == DrawDirectionSnapMode::Diagonal45;
+    const bool free_snap     = m_draft.snap_mode == DrawDirectionSnapMode::Free;
     update_draft(m_draft.raw_mouse, diagonal_snap, free_snap);
     if (m_canvas) m_canvas->Refresh(false);
 }

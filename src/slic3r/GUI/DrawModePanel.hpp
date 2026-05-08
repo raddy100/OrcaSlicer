@@ -7,6 +7,7 @@
 #include <wx/tglbtn.h>
 #include <wx/textctrl.h>
 #include <wx/dcclient.h>
+#include <wx/choice.h>
 
 #include "libslic3r/DrawSession.hpp"
 #include "libslic3r/DrawModeFeedback.hpp"
@@ -66,6 +67,7 @@ private:
     wxToggleButton*    m_edit_toggle    { nullptr };
     wxToggleButton*    m_fill_toggle    { nullptr }; // filled-quad width preview
     wxToggleButton*    m_snap_toggle    { nullptr }; // snap-to-grid (on by default)
+    wxChoice*          m_grid_res_choice{ nullptr }; // snap grid resolution selector
     wxToggleButton*    m_measure_toggle { nullptr };
     wxToggleButton*    m_coord_toggle   { nullptr };
     wxTextCtrl*        m_length_input   { nullptr };
@@ -103,8 +105,10 @@ private:
     double               m_nozzle_d    { 0.4 };
     // Filled-quad width preview toggle
     bool                 m_show_filled { false };
-    // Snap-to-grid (grid resolution = nozzle_diameter, on by default)
+    // Snap-to-grid toggle (on by default); resolution controlled by m_grid_spacing
     bool                 m_snap_to_grid { true };
+    // Selectable snap-grid resolution in mm (0.1–1.0, default 0.4)
+    double               m_grid_spacing { 0.4 };
     bool                 m_show_measurements { true };
     bool                 m_show_coordinates  { true };
 
@@ -181,6 +185,7 @@ private:
     void on_edit_toggle(wxCommandEvent& evt);
     void on_fill_toggle(wxCommandEvent& evt);
     void on_snap_toggle(wxCommandEvent& evt);
+    void on_grid_res_change(wxCommandEvent& evt);
     void on_measure_toggle(wxCommandEvent& evt);
     void on_coord_toggle(wxCommandEvent& evt);
     void on_length_text(wxCommandEvent& evt);
