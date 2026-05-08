@@ -79,7 +79,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_canvas = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                            wxFULL_REPAINT_ON_RESIZE | wxWANTS_CHARS);
     m_canvas->SetBackgroundStyle(wxBG_STYLE_PAINT); // suppress default erase
-    m_canvas->SetBackgroundColour(wxColour(30, 30, 30));
+    m_canvas->SetBackgroundColour(wxColour(55, 55, 55));
     m_canvas->SetCursor(wxCursor(wxCURSOR_CROSS));
 
     // Layout
@@ -528,7 +528,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
     wxSize sz = m_canvas->GetClientSize();
 
     // Background
-    dc.SetBackground(wxBrush(wxColour(30, 30, 30)));
+    dc.SetBackground(wxBrush(wxColour(55, 55, 55)));
     dc.Clear();
 
     // Plate rectangle — use the centered uniform-scale drawing area
@@ -538,20 +538,68 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
     const int drw = static_cast<int>(dt.draw_w);
     const int drh = static_cast<int>(dt.draw_h);
 
-    dc.SetPen(wxPen(wxColour(90, 90, 90), 1));
-    dc.SetBrush(wxBrush(wxColour(45, 45, 45)));
+    dc.SetPen(wxPen(wxColour(105, 105, 105), 1));
+    dc.SetBrush(wxBrush(wxColour(68, 68, 68)));
     dc.DrawRectangle(drx, dry, drw, drh);
 
-    // Centre-axis lines at X=0 (Y-axis) and Y=0 (X-axis) — clipped to the drawing rect.
-    // Plate coords run from -half to +half in each axis; axes cross at (0,0).
+    // Multi-tier reference grid — distances measured from origin (0,0).
+    // Tiers (most prominent last so they paint on top):
+    //   0.5mm lines: shown when scale >= 10 px/mm
+    //   1mm lines:   shown when scale >= 4 px/mm (visible at all normal zoom levels)
+    //   5mm lines:   always shown (prominent quarter-plate divisions)
+    //   Centre axes (X=0, Y=0): always shown, most prominent
     {
-        const double half_w = m_plate_w_mm * 0.5;
-        const double half_h = m_plate_h_mm * 0.5;
-        dc.SetPen(wxPen(wxColour(60, 60, 60), 1, wxPENSTYLE_DOT));
-        // Y-axis (X=0)
+        const double half_w  = m_plate_w_mm * 0.5;
+        const double half_h  = m_plate_h_mm * 0.5;
+        const bool   show_1mm  = (dt.scale >= 4.0);
+        const bool   show_05mm = (dt.scale >= 10.0);
+
+        // 0.5mm non-integer positions (±0.5, ±1.5, ±2.5 … ±9.5)
+        if (show_05mm) {
+            dc.SetPen(wxPen(wxColour(78, 78, 78), 1));
+            for (int i = -20; i <= 20; ++i) {
+                if (i == 0 || i % 2 == 0) continue; // skip origin and 1mm positions
+                const double pos = i * 0.5;
+                const wxPoint pv = plate_to_screen(Vec2d(pos, -half_h));
+                if (pv.x >= drx && pv.x <= drx + drw)
+                    dc.DrawLine(pv.x, dry, pv.x, dry + drh);
+                const wxPoint ph = plate_to_screen(Vec2d(-half_w, pos));
+                if (ph.y >= dry && ph.y <= dry + drh)
+                    dc.DrawLine(drx, ph.y, drx + drw, ph.y);
+            }
+        }
+
+        // 1mm positions, skipping 5mm multiples and origin (±1, ±2, ±3, ±4, ±6…)
+        if (show_1mm) {
+            dc.SetPen(wxPen(wxColour(84, 84, 84), 1));
+            for (int i = -10; i <= 10; ++i) {
+                if (i == 0 || i % 5 == 0) continue;
+                const double pos = static_cast<double>(i);
+                const wxPoint pv = plate_to_screen(Vec2d(pos, -half_h));
+                if (pv.x >= drx && pv.x <= drx + drw)
+                    dc.DrawLine(pv.x, dry, pv.x, dry + drh);
+                const wxPoint ph = plate_to_screen(Vec2d(-half_w, pos));
+                if (ph.y >= dry && ph.y <= dry + drh)
+                    dc.DrawLine(drx, ph.y, drx + drw, ph.y);
+            }
+        }
+
+        // 5mm lines (±5 from origin; ±10 = plate edge, already shown by border)
+        dc.SetPen(wxPen(wxColour(90, 90, 90), 1));
+        for (int sign = -1; sign <= 1; sign += 2) {
+            const double pos = sign * 5.0;
+            const wxPoint pv = plate_to_screen(Vec2d(pos, -half_h));
+            if (pv.x >= drx && pv.x <= drx + drw)
+                dc.DrawLine(pv.x, dry, pv.x, dry + drh);
+            const wxPoint ph = plate_to_screen(Vec2d(-half_w, pos));
+            if (ph.y >= dry && ph.y <= dry + drh)
+                dc.DrawLine(drx, ph.y, drx + drw, ph.y);
+        }
+
+        // Centre axes (X=0 / Y=0): always drawn, most prominent
+        dc.SetPen(wxPen(wxColour(100, 100, 100), 1));
         const wxPoint py_axis = plate_to_screen(Vec2d(0.0, -half_h));
         dc.DrawLine(py_axis.x, dry, py_axis.x, dry + drh);
-        // X-axis (Y=0)
         const wxPoint px_axis = plate_to_screen(Vec2d(-half_w, 0.0));
         dc.DrawLine(drx, px_axis.y, drx + drw, px_axis.y);
     }
@@ -561,7 +609,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
     if (m_snap_to_grid && m_grid_spacing > 0.0) {
         const double dot_spacing_px = dt.scale * m_grid_spacing;
         if (dot_spacing_px >= 6.0) {
-            dc.SetPen(wxPen(wxColour(72, 72, 72), 1));
+            dc.SetPen(wxPen(wxColour(86, 86, 86), 1));
             const double g         = m_grid_spacing;
             const double half_w    = m_plate_w_mm * 0.5;
             const double half_h    = m_plate_h_mm * 0.5;
