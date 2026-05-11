@@ -46,3 +46,6 @@ test.js
 internal_docs/
 *.flatpak
 /flatpak-repo/
+# Large local tools - never commit
+tools/strawberry-perl/
+tools/strawberry-perl.zip
