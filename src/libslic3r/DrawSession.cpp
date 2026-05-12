@@ -39,6 +39,28 @@ void DrawSession::clear()
     active_layer = -1;
 }
 
+bool DrawSession::remove_layer(int index)
+{
+    if (index < 0 || index >= (int)layers.size())
+        return false;
+
+    const int prev_active = active_layer;
+    layers.erase(layers.begin() + index);
+
+    if (layers.empty()) {
+        active_layer = -1;
+    } else if (prev_active == index) {
+        // Removed the active layer: step back to previous, floor at 0
+        active_layer = std::max(0, index - 1);
+    } else if (prev_active > index) {
+        // Active layer shifted down by the removal above it
+        active_layer = prev_active - 1;
+    }
+    // prev_active < index: unchanged
+
+    return true;
+}
+
 double DrawSession::total_height() const
 {
     if (layers.empty())

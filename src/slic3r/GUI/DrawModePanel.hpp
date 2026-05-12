@@ -74,7 +74,9 @@ private:
     wxButton*          m_snip_btn       { nullptr }; // break continuous chain
     wxButton*          m_prev_layer_btn { nullptr };
     wxButton*          m_next_layer_btn { nullptr };
+    wxButton*          m_remove_layer_btn { nullptr }; // go down / delete if empty
     wxButton*          m_add_layer_btn  { nullptr };
+    wxButton*          m_delete_layer_btn { nullptr }; // always delete current layer
     wxButton*          m_clear_btn      { nullptr };
     wxButton*          m_simulate_btn   { nullptr };
     wxButton*          m_finalize_btn   { nullptr };
@@ -197,6 +199,8 @@ private:
     void on_prev_layer(wxCommandEvent& evt);
     void on_next_layer(wxCommandEvent& evt);
     void on_add_layer(wxCommandEvent& evt);
+    void on_remove_layer(wxCommandEvent& evt);
+    void on_delete_layer(wxCommandEvent& evt);
     void on_clear_layer(wxCommandEvent& evt);
     void on_simulate(wxCommandEvent& evt);
     void on_finalize(wxCommandEvent& evt);

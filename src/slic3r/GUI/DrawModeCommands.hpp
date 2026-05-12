@@ -92,5 +92,19 @@ struct ClearLayerCommand : DrawCommand {
     void undo(DrawSession& session) override;
 };
 
+// Remove an entire layer (including all its segments) from the session.
+// Undoable: re-inserts the layer and restores active_layer.
+struct RemoveLayerCommand : DrawCommand {
+    int       layer_index;
+    DrawLayer saved_layer;  // populated during execute() for undo
+    int       saved_active; // active_layer before execute(), restored on undo
+
+    explicit RemoveLayerCommand(int layer_idx)
+        : layer_index(layer_idx), saved_active(-1) {}
+
+    void execute(DrawSession& session) override;
+    void undo(DrawSession& session) override;
+};
+
 } // namespace GUI
 } // namespace Slic3r

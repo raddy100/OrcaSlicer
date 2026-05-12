@@ -41,6 +41,12 @@ struct DrawSession {
     bool   is_empty() const;
     // Appends a new layer using layer_height baked from the active profile.
     void   add_layer(double layer_height);
+    // Removes the layer at index and adjusts active_layer:
+    //   active == index => step to max(0, index-1), or -1 if no layers remain
+    //   active >  index => decrement by 1 (layer shifted down)
+    //   active <  index => unchanged
+    // Returns false if index is out of range.
+    bool   remove_layer(int index);
     void   clear();
     double total_height() const;
 

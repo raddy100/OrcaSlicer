@@ -279,3 +279,185 @@ TEST_CASE("Draw3mf: round-trip preserves draw session", "[Draw3mf]")
     REQUIRE_THAT(s10.end.x(),   WithinAbs(5.0, 1e-6));
     REQUIRE_THAT(s10.end.y(),   WithinAbs(5.0, 1e-6));
 }
+
+// ---------------------------------------------------------------------------
+// DrawSession::remove_layer tests
+// ---------------------------------------------------------------------------
+
+namespace {
+DrawSegment make_seg(double x0, double y0, double x1, double y1)
+{
+    DrawSegment s;
+    s.start = Vec2d(x0, y0);
+    s.end   = Vec2d(x1, y1);
+    s.is_travel = false;
+    return s;
+}
+} // anonymous namespace
+
+TEST_CASE("DrawSession::remove_layer - empty session returns false", "[DrawSession]")
+{
+    DrawSession s;
+    REQUIRE_FALSE(s.remove_layer(0));
+    REQUIRE(s.layer_count() == 0);
+    REQUIRE(s.active_layer == -1);
+}
+
+TEST_CASE("DrawSession::remove_layer - out-of-range index returns false", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2);
+    REQUIRE_FALSE(s.remove_layer(-1));
+    REQUIRE_FALSE(s.remove_layer(1));
+    REQUIRE(s.layer_count() == 1); // unchanged
+}
+
+TEST_CASE("DrawSession::remove_layer - only layer leaves empty session", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2);
+    s.layers[0].segments.push_back(make_seg(0, 0, 5, 5));
+
+    REQUIRE(s.remove_layer(0));
+    REQUIRE(s.layer_count() == 0);
+    REQUIRE(s.active_layer == -1);
+}
+
+TEST_CASE("DrawSession::remove_layer - removes last of 3 layers", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2); // layer 0
+    s.add_layer(0.2); // layer 1
+    s.add_layer(0.2); // layer 2, active
+
+    REQUIRE(s.active_layer == 2);
+    REQUIRE(s.remove_layer(2));
+    REQUIRE(s.layer_count() == 2);
+    // Active was the removed layer (2): should step back to 1
+    REQUIRE(s.active_layer == 1);
+}
+
+TEST_CASE("DrawSession::remove_layer - removes middle of 3 layers", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2); // layer 0
+    s.add_layer(0.2); // layer 1
+    s.add_layer(0.2); // layer 2, active
+    s.active_layer = 1; // manually select the middle layer
+
+    REQUIRE(s.remove_layer(1));
+    REQUIRE(s.layer_count() == 2);
+    // Active was the removed layer (1): step back to max(0, 1-1) = 0
+    REQUIRE(s.active_layer == 0);
+}
+
+TEST_CASE("DrawSession::remove_layer - removes first of 3 layers", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2); // layer 0
+    s.add_layer(0.2); // layer 1
+    s.add_layer(0.2); // layer 2
+    s.active_layer = 0;
+
+    REQUIRE(s.remove_layer(0));
+    REQUIRE(s.layer_count() == 2);
+    // Active was 0 (removed): max(0, 0-1) = 0; stays at new layer 0
+    REQUIRE(s.active_layer == 0);
+}
+
+TEST_CASE("DrawSession::remove_layer - active above removed shifts down", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2); // layer 0
+    s.add_layer(0.2); // layer 1
+    s.add_layer(0.2); // layer 2
+    s.active_layer = 2;
+
+    // Remove layer 0 (active is above it)
+    REQUIRE(s.remove_layer(0));
+    REQUIRE(s.layer_count() == 2);
+    // active (2) was above removed (0): should shift to 1
+    REQUIRE(s.active_layer == 1);
+}
+
+TEST_CASE("DrawSession::remove_layer - active below removed stays unchanged", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2); // layer 0
+    s.add_layer(0.2); // layer 1
+    s.add_layer(0.2); // layer 2
+    s.active_layer = 0;
+
+    // Remove layer 2 (active is below it)
+    REQUIRE(s.remove_layer(2));
+    REQUIRE(s.layer_count() == 2);
+    // active (0) was below removed (2): unchanged
+    REQUIRE(s.active_layer == 0);
+}
+
+TEST_CASE("DrawSession::remove_layer - Z values of remaining layers are preserved", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2); // layer 0: z 0.0–0.2
+    s.add_layer(0.3); // layer 1: z 0.2–0.5
+    s.add_layer(0.1); // layer 2: z 0.5–0.6
+
+    s.remove_layer(1); // remove middle layer
+
+    REQUIRE(s.layer_count() == 2);
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.2, 1e-9));
+    // What was layer 2 is now layer 1
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.5, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+}
+
+TEST_CASE("DrawSession::remove_layer - segments in remaining layers preserved", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2); // layer 0
+    s.add_layer(0.2); // layer 1 - will be removed
+    s.add_layer(0.2); // layer 2
+    s.layers[0].segments.push_back(make_seg(0, 0, 1, 0));
+    s.layers[1].segments.push_back(make_seg(2, 2, 3, 3)); // this layer gets removed
+    s.layers[2].segments.push_back(make_seg(4, 4, 5, 5));
+
+    s.remove_layer(1);
+
+    REQUIRE(s.layer_count() == 2);
+    REQUIRE(s.layers[0].segments.size() == 1);
+    REQUIRE_THAT(s.layers[0].segments[0].end.x(), WithinAbs(1.0, 1e-9));
+    REQUIRE(s.layers[1].segments.size() == 1);
+    REQUIRE_THAT(s.layers[1].segments[0].start.x(), WithinAbs(4.0, 1e-9));
+}
+
+TEST_CASE("DrawSession::remove_layer - removing empty layer 0 when others exist", "[DrawSession]")
+{
+    // Edge case: layer 0 is empty, layers 1 and 2 have content.
+    // Removing layer 0 should keep active at 0 (new first layer).
+    DrawSession s;
+    s.add_layer(0.2); // layer 0 - empty
+    s.add_layer(0.2); // layer 1
+    s.add_layer(0.2); // layer 2
+    s.layers[1].segments.push_back(make_seg(0, 0, 5, 0));
+    s.layers[2].segments.push_back(make_seg(5, 0, 5, 5));
+    s.active_layer = 0;
+
+    REQUIRE(s.remove_layer(0));
+    REQUIRE(s.layer_count() == 2);
+    REQUIRE(s.active_layer == 0); // clamped to max(0, 0-1) = 0
+    // Old layer 1 is now layer 0 and still has its segment
+    REQUIRE(s.layers[0].segments.size() == 1);
+}
+
+TEST_CASE("DrawSession::remove_layer - single empty layer leaves no layers", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2); // empty layer
+
+    REQUIRE(s.is_empty());
+    REQUIRE(s.remove_layer(0));
+    REQUIRE(s.layer_count() == 0);
+    REQUIRE(s.active_layer == -1);
+    REQUIRE(s.is_empty());
+}

@@ -39,7 +39,11 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_layer_label    = new wxStaticText(this, wxID_ANY, "No layers",
         wxDefaultPosition, wxSize(240, -1), wxALIGN_CENTRE_HORIZONTAL);
     m_next_layer_btn = new wxButton(this, wxID_ANY, "Next >");
+    m_remove_layer_btn = new wxButton(this, wxID_ANY, "- Layer");
     m_add_layer_btn  = new wxButton(this, wxID_ANY, "+ Layer");
+    m_delete_layer_btn = new wxButton(this, wxID_ANY, "Delete Layer");
+    m_remove_layer_btn->SetToolTip("Go down a layer.\nIf the current layer is empty it will be deleted.");
+    m_delete_layer_btn->SetToolTip("Delete the current layer and all its segments.");
 
     // Mode toggles
     m_draw_toggle = new wxToggleButton(this, wxID_ANY, "Draw");
@@ -102,10 +106,12 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     top_sizer->Add(m_finalize_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
 
     auto* nav_sizer = new wxBoxSizer(wxHORIZONTAL);
-    nav_sizer->Add(m_prev_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_layer_label,    1, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_next_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_add_layer_btn,  0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    nav_sizer->Add(m_prev_layer_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    nav_sizer->Add(m_layer_label,      1, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    nav_sizer->Add(m_next_layer_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    nav_sizer->Add(m_remove_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    nav_sizer->Add(m_add_layer_btn,    0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    nav_sizer->Add(m_delete_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
 
     auto* main_sizer = new wxBoxSizer(wxVERTICAL);
     main_sizer->Add(top_sizer, 0, wxEXPAND);
@@ -128,6 +134,8 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_prev_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_prev_layer, this);
     m_next_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_next_layer, this);
     m_add_layer_btn->Bind(wxEVT_BUTTON,  &DrawModePanel::on_add_layer,  this);
+    m_remove_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_remove_layer, this);
+    m_delete_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_delete_layer, this);
     m_clear_btn->Bind(wxEVT_BUTTON,      &DrawModePanel::on_clear_layer, this);
     m_simulate_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_simulate,    this);
     m_finalize_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_finalize,    this);
@@ -282,19 +290,32 @@ void DrawModePanel::update_layer_label()
 {
     if (!m_layer_label) return;
 
-    int count = m_session.layer_count();
+    const int count  = m_session.layer_count();
+    const int active = (count > 0) ? m_session.active_layer : -1;
+
     if (count == 0) {
         m_layer_label->SetLabel("No layers - click '+ Layer' to start");
-        return;
+    } else {
+        const int disp = (active >= 0 && active < count) ? active : count - 1;
+        const DrawLayer& l = m_session.layers[disp];
+        m_layer_label->SetLabel(wxString::Format(
+            "Layer %d of %d  (Z: %.3f -> %.3f mm)",
+            disp + 1, count, l.z_start, l.z_end));
     }
 
-    int active = m_session.active_layer;
-    if (active < 0 || active >= count) active = count - 1;
+    // Enable / disable navigation and layer action buttons.
+    const bool has_layers    = count > 0;
+    const bool active_valid  = has_layers && active >= 0 && active < count;
+    const bool layer_empty   = active_valid && m_session.layers[active].segments.empty();
+    // "- Layer": enabled when there is somewhere meaningful to go:
+    //   • active layer is empty  (can delete it even on layer 0)
+    //   • OR there is a layer below the current one
+    const bool can_remove = has_layers && (layer_empty || active > 0);
 
-    const DrawLayer& l = m_session.layers[active];
-    m_layer_label->SetLabel(wxString::Format(
-        "Layer %d of %d  (Z: %.3f -> %.3f mm)",
-        active + 1, count, l.z_start, l.z_end));
+    if (m_prev_layer_btn)    m_prev_layer_btn->Enable(active > 0);
+    if (m_next_layer_btn)    m_next_layer_btn->Enable(has_layers && active < count - 1);
+    if (m_remove_layer_btn)  m_remove_layer_btn->Enable(can_remove);
+    if (m_delete_layer_btn)  m_delete_layer_btn->Enable(has_layers);
 }
 
 void DrawModePanel::dispatch_command(std::unique_ptr<DrawCommand> cmd)
@@ -1114,6 +1135,36 @@ void DrawModePanel::on_add_layer(wxCommandEvent&)
         if (lh <= 0.0) lh = 0.2;
     }
     dispatch_command(std::make_unique<AddLayerCommand>(lh));
+}
+
+void DrawModePanel::on_remove_layer(wxCommandEvent&)
+{
+    const int active = m_session.active_layer;
+    if (active < 0 || active >= m_session.layer_count()) return;
+
+    const bool layer_empty = m_session.layers[active].segments.empty();
+
+    if (layer_empty) {
+        // Delete the empty layer and step back (or to no-layers if it was the first)
+        dispatch_command(std::make_unique<RemoveLayerCommand>(active));
+        reset_draft(false);
+    } else if (active > 0) {
+        // Layer has content: just navigate down without deleting
+        m_session.active_layer--;
+        reset_draft(false);
+        refresh();
+    }
+    // Layer 0 with segments: no-op — can't go below the first layer with content
+}
+
+void DrawModePanel::on_delete_layer(wxCommandEvent&)
+{
+    const int active = m_session.active_layer;
+    if (active < 0 || active >= m_session.layer_count()) return;
+
+    // Always remove the entire layer (segments and all), then step back.
+    dispatch_command(std::make_unique<RemoveLayerCommand>(active));
+    reset_draft(false);
 }
 
 void DrawModePanel::on_clear_layer(wxCommandEvent&)
