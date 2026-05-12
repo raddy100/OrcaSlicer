@@ -293,15 +293,9 @@ void DrawModePanel::update_layer_label()
     const int count  = m_session.layer_count();
     const int active = (count > 0) ? m_session.active_layer : -1;
 
-    if (count == 0) {
-        m_layer_label->SetLabel("No layers - click '+ Layer' to start");
-    } else {
-        const int disp = (active >= 0 && active < count) ? active : count - 1;
-        const DrawLayer& l = m_session.layers[disp];
-        m_layer_label->SetLabel(wxString::Format(
-            "Layer %d of %d  (Z: %.3f -> %.3f mm)",
-            disp + 1, count, l.z_start, l.z_end));
-    }
+    // Display counter: 0 before any layer is added, then 1, 2, 3, ...
+    const int display_layer = (active < 0) ? 0 : active + 1;
+    m_layer_label->SetLabel(wxString::Format("Layer: %d", display_layer));
 
     // Enable / disable navigation and layer action buttons.
     const bool has_layers    = count > 0;
