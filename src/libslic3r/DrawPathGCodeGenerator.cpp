@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <boost/nowide/fstream.hpp>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -117,6 +118,41 @@ DrawPathGCodeGenerator::collect_batch(const std::vector<ModelObject*>& objects)
         }
     }
     return batch;
+}
+
+bool DrawPathGCodeGenerator::can_generate_for_objects(const std::vector<ModelObject*>& objects)
+{
+    return contains_only_draw_path_objects(objects) && !collect_batch(objects).empty();
+}
+
+bool DrawPathGCodeGenerator::write_gcode_file(const std::string& path,
+                                              const std::string& gcode,
+                                              std::string*       error_message)
+{
+    boost::nowide::ofstream out(path, std::ios::binary);
+    if (!out) {
+        if (error_message)
+            *error_message = "Cannot open output file for writing.";
+        return false;
+    }
+
+    out.write(gcode.data(), static_cast<std::streamsize>(gcode.size()));
+    if (!out) {
+        if (error_message)
+            *error_message = "Failed while writing G-code.";
+        return false;
+    }
+
+    out.close();
+    if (!out) {
+        if (error_message)
+            *error_message = "Failed to close G-code file after writing.";
+        return false;
+    }
+
+    if (error_message)
+        error_message->clear();
+    return true;
 }
 
 // ---------------------------------------------------------------------------

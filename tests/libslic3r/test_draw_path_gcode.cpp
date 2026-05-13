@@ -5,8 +5,11 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include <algorithm>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -496,6 +499,68 @@ TEST_CASE("DrawPathGCodeGenerator: draw-path plate helpers require all objects t
     objects.push_back(normal_object);
 
     REQUIRE_FALSE(DrawPathGCodeGenerator::contains_only_draw_path_objects(objects));
+    REQUIRE_FALSE(DrawPathGCodeGenerator::can_generate_for_objects(objects));
+}
+
+TEST_CASE("DrawPathGCodeGenerator: recovered legacy copies can be batch generated for export",
+    "[DrawPathGCodeGenerator]")
+{
+    Model model;
+
+    ModelObject* source = model.add_object("DrawPathObject", "", make_cube(1.0, 1.0, 1.0));
+    source->add_instance();
+    source->instances.front()->set_offset(Vec3d(10.0, 20.0, 0.0));
+    source->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+
+    auto session = std::make_unique<DrawSession>();
+    session->add_layer(0.2);
+    session->layers.front().segments.push_back({ Vec2d(0.0, 0.0), Vec2d(5.0, 0.0), false });
+    source->draw_session = std::move(session);
+
+    ModelObject* recovered_copy = model.add_object(*source);
+    recovered_copy->instances.front()->set_offset(Vec3d(30.0, 40.0, 0.0));
+    recovered_copy->draw_session = std::make_unique<DrawSession>(*source->draw_session);
+
+    ModelObjectPtrs objects { source, recovered_copy };
+    REQUIRE(DrawPathGCodeGenerator::can_generate_for_objects(objects));
+
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate_batch(DrawPathGCodeGenerator::collect_batch(objects));
+
+    REQUIRE_FALSE(gcode.empty());
+    REQUIRE(gcode.find("X15") != std::string::npos);
+    REQUIRE(gcode.find("Y20") != std::string::npos);
+    REQUIRE(gcode.find("X35") != std::string::npos);
+    REQUIRE(gcode.find("Y40") != std::string::npos);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: generated G-code can be written and copied to arbitrary path",
+    "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_test_session());
+    REQUIRE_FALSE(gcode.empty());
+
+    namespace fs = boost::filesystem;
+    const fs::path source = fs::temp_directory_path() / fs::unique_path("orca_draw_export_source_%%%%-%%%%.gcode");
+    const fs::path target = fs::temp_directory_path() / fs::unique_path("orca_draw_export_target_%%%%-%%%%.gcode");
+
+    std::string write_error;
+    REQUIRE(DrawPathGCodeGenerator::write_gcode_file(source.string(), gcode, &write_error));
+    REQUIRE(write_error.empty());
+    REQUIRE(fs::exists(source));
+    REQUIRE(fs::file_size(source) == gcode.size());
+
+    std::string copy_error;
+    REQUIRE(copy_file(source.string(), target.string(), copy_error, true) == CopyFileResult::SUCCESS);
+    REQUIRE(fs::exists(target));
+    REQUIRE(fs::file_size(target) == gcode.size());
+
+    fs::remove(source);
+    fs::remove(target);
 }
 
 TEST_CASE("DrawPathGCodeGenerator: generated G-code can populate preview processor result",

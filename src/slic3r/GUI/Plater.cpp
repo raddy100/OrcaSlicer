@@ -67,6 +67,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ObjColorUtils.hpp"
+#include "libslic3r/DrawPathGCodeGenerator.hpp"
 // For stl export
 #include "libslic3r/CSGMesh/ModelToCSGMesh.hpp"
 #include "libslic3r/CSGMesh/PerformCSGMeshBooleans.hpp"
@@ -8172,6 +8173,9 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
 
     show_warning_dialog = true;
     if (! output_path.empty()) {
+        if (PartPlate* current_plate = background_process.get_current_plate();
+            current_plate && DrawPathGCodeGenerator::can_generate_for_objects(current_plate->get_objects_on_this_plate()))
+            background_process.request_draw_path_gcode();
         background_process.schedule_export(output_path.string(), output_path_on_removable_media);
         notification_manager->push_delayed_notification(NotificationType::ExportOngoing, []() {return true; }, 1000, 0);
     } else {
@@ -8204,6 +8208,9 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
 
     show_warning_dialog = true;
     if (! output_path.empty()) {
+        if (PartPlate* current_plate = background_process.get_current_plate();
+            current_plate && DrawPathGCodeGenerator::can_generate_for_objects(current_plate->get_objects_on_this_plate()))
+            background_process.request_draw_path_gcode();
         background_process.schedule_export(output_path.string(), output_path_on_removable_media);
         notification_manager->push_delayed_notification(NotificationType::ExportOngoing, []() {return true; }, 1000, 0);
     } else {

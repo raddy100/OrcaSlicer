@@ -32,7 +32,6 @@
 #include <boost/format/format_fwd.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/log/trivial.hpp>
-#include <boost/nowide/cstdio.hpp>
 #include "I18N.hpp"
 //#include "RemovableDriveManager.hpp"
 
@@ -250,12 +249,9 @@ void BackgroundSlicingProcess::process_fff()
 	            throw Slic3r::RuntimeError("Draw Mode simulation requested, but no current plate is available for G-code generation.");
 
 	        m_temp_output_path = m_current_plate->get_tmp_gcode_path();
-	        if (FILE* f = boost::nowide::fopen(m_temp_output_path.c_str(), "wb")) {
-	            std::fwrite(gcode.data(), 1, gcode.size(), f);
-	            std::fclose(f);
-	        }
-	        else
-	            throw Slic3r::RuntimeError("Failed to write draw-path G-code for preview.");
+	        std::string write_error;
+	        if (!DrawPathGCodeGenerator::write_gcode_file(m_temp_output_path, gcode, &write_error))
+	            throw Slic3r::RuntimeError("Failed to write draw-path G-code: " + write_error);
 
 	        // Mirror the normal "G-code export" side effects without invoking the
 	        // Arachne slicer: populate the preview processor result from the G-code
@@ -779,6 +775,14 @@ StringObjectException BackgroundSlicingProcess::validate(StringObjectException *
     assert(m_print == m_fff_print);
 
     m_fff_print->is_BBL_printer() = wxGetApp().preset_bundle->is_bbl_vendor();
+    if (m_current_plate) {
+        const ModelObjectPtrs plate_objects = m_current_plate->get_objects_on_this_plate();
+        if (DrawPathGCodeGenerator::can_generate_for_objects(plate_objects)) {
+            if (warning)
+                *warning = {};
+            return {};
+        }
+    }
     return m_print->validate(warning, collison_polygons, height_polygons);
 }
 
