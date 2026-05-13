@@ -23,6 +23,7 @@
 #include "libslic3r/Format/SL1.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 
 #include <cassert>
 #include <stdexcept>
@@ -203,6 +204,7 @@ void BackgroundSlicingProcess::process_fff()
     m_fff_print->is_BBL_printer() = preset_bundle.is_bbl_vendor();
 
 	const bool draw_path_requested = consume_draw_path_gcode_request();
+	bool draw_path_generated = false;
 	// --- DRAW MODE: check first, before the "reuse finished print" early-exit. ---
 	// If every object on the current plate is a draw-path object we generate G-code
 	// directly via DrawPathGCodeGenerator and skip the entire normal slicing pipeline.
@@ -255,19 +257,45 @@ void BackgroundSlicingProcess::process_fff()
 	        else
 	            throw Slic3r::RuntimeError("Failed to write draw-path G-code for preview.");
 
+	        // Mirror the normal "G-code export" side effects without invoking the
+	        // Arachne slicer: populate the preview processor result from the G-code
+	        // that DrawPathGCodeGenerator produced, and mark psGCodeExport done so
+	        // Preview::load_print_as_fff() may load m_gcode_result directly.
+	        GCodeProcessor processor;
+	        GCodeProcessor::s_IsBBLPrinter = m_fff_print->is_BBL_printer();
+	        processor.apply_config(m_fff_print->config());
+	        processor.initialize(m_temp_output_path);
+	        processor.initialize_result_moves();
+	        processor.process_buffer(gcode);
+	        processor.finalize(false);
+	        *m_gcode_result = std::move(processor.extract_result());
+	        m_gcode_result->filename = m_temp_output_path;
+	        m_gcode_result->lines_ends.clear();
+	        for (std::size_t i = 0; i < gcode.size(); ++i)
+	            if (gcode[i] == '\n')
+	                m_gcode_result->lines_ends.emplace_back(i + 1);
+	        if (m_gcode_result->lines_ends.empty() || m_gcode_result->lines_ends.back() != gcode.size())
+	            m_gcode_result->lines_ends.emplace_back(gcode.size());
+	        m_fff_print->set_gcode_file_ready();
+
 	        m_fff_print->set_status(80, _utf8(L("Draw-path G-code complete")));
 	        wxCommandEvent evt(m_event_slicing_completed_id);
 	        evt.SetInt(0); // no slicer-step timestamp for draw-path objects
 	        wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt.Clone());
-	        return; // done — skip all normal slicing logic below
+	        draw_path_generated = true;
 	    }
 
-	    if (draw_path_requested)
+	    if (draw_path_requested && !draw_path_generated)
 	        throw Slic3r::RuntimeError("Draw Mode simulation requested, but the current plate is not a pure draw-path plate.");
 	}
 
 	//BBS: add the logic to process from an existed gcode file
-	if (m_print->finished()) {
+	if (draw_path_generated) {
+		// Draw-path G-code has already been generated and processed above.
+		// Continue into the shared finalize block below so completion progress,
+		// step state, and EVT_PROCESS_COMPLETED semantics match normal slicing.
+	}
+	else if (m_print->finished()) {
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: skip slicing, to process previous gcode file")%__LINE__;
 		m_fff_print->set_status(80, _utf8(L("Processing G-code from Previous file...")));
 		wxCommandEvent evt(m_event_slicing_completed_id);

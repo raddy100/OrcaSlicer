@@ -1,10 +1,12 @@
 #include <catch2/catch_all.hpp>
 #include "libslic3r/DrawPathGCodeGenerator.hpp"
 #include "libslic3r/DrawSession.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -396,6 +398,38 @@ TEST_CASE("DrawPathGCodeGenerator: draw-path plate helpers require all objects t
     objects.push_back(normal_object);
 
     REQUIRE_FALSE(DrawPathGCodeGenerator::contains_only_draw_path_objects(objects));
+}
+
+TEST_CASE("DrawPathGCodeGenerator: generated G-code can populate preview processor result",
+    "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+
+    DrawSession session;
+    session.add_layer(0.2);
+    DrawLayer& layer = session.layers.back();
+    layer.segments.push_back({ Vec2d(0.0, 0.0), Vec2d(10.0, 0.0), false });
+    layer.segments.push_back({ Vec2d(10.0, 0.0), Vec2d(10.0, 10.0), false });
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    GCodeProcessor processor;
+    PrintConfig processor_config;
+    processor.apply_config(processor_config);
+    processor.initialize("draw-path-preview.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+    processor.finalize(false);
+
+    const GCodeProcessorResult& result = processor.get_result();
+
+    REQUIRE(result.filename == "draw-path-preview.gcode");
+    REQUIRE(result.moves.size() > 1);
+
+    const auto extrusion_move = std::find_if(result.moves.begin(), result.moves.end(),
+        [](const GCodeProcessorResult::MoveVertex& move) { return move.delta_extruder > 0.0f; });
+    REQUIRE(extrusion_move != result.moves.end());
 }
 
 // ---------------------------------------------------------------------------
