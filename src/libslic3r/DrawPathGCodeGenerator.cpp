@@ -228,15 +228,23 @@ std::string DrawPathGCodeGenerator::generate_preamble(const DrawSession& session
     out += m_writer.preamble();
     out += m_writer.reset_e(true);
 
-    // Nozzle warm-up — use first-layer temperature and wait (M109).
-    const int first_layer_temp = cfg_int_vec("nozzle_temperature_initial_layer");
-    if (first_layer_temp > 0)
-        out += m_writer.set_temperature(static_cast<unsigned int>(first_layer_temp), /*wait=*/true, /*tool=*/0);
+    const auto* machine_start_gcode = dynamic_cast<const ConfigOptionString*>(m_config.option("machine_start_gcode"));
+    const bool has_machine_start_gcode = machine_start_gcode && machine_start_gcode->value.find_first_not_of(" \t\r\n") != std::string::npos;
 
-    // Bed heat-up (M190). We use hot_plate_temp as a reasonable default.
-    const int bed_temp = cfg_int_vec("hot_plate_temp");
-    if (bed_temp > 0)
-        out += m_writer.set_bed_temperature(bed_temp, /*wait=*/true);
+    // Profile start G-code owns the printer-specific startup heat cycle.  Only
+    // emit generic waits as a fallback for simple/minimal configs without a
+    // machine start template.
+    if (!has_machine_start_gcode) {
+        // Nozzle warm-up — use first-layer temperature and wait (M109).
+        const int first_layer_temp = cfg_int_vec("nozzle_temperature_initial_layer");
+        if (first_layer_temp > 0)
+            out += m_writer.set_temperature(static_cast<unsigned int>(first_layer_temp), /*wait=*/true, /*tool=*/0);
+
+        // Bed heat-up (M190). We use hot_plate_temp as a reasonable default.
+        const int bed_temp = cfg_int_vec("hot_plate_temp");
+        if (bed_temp > 0)
+            out += m_writer.set_bed_temperature(bed_temp, /*wait=*/true);
+    }
 
     // Process profile start templates with placeholders expanded.  Do not append
     // raw templates: production printer profiles often contain conditionals and

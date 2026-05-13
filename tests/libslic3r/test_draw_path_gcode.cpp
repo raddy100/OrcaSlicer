@@ -114,6 +114,17 @@ static std::optional<double> extract_axis_value(const std::string& line, char ax
     return std::stod(line.substr(ap + 2));
 }
 
+static std::size_t count_occurrences(const std::string& text, const std::string& needle)
+{
+    std::size_t count = 0;
+    std::size_t pos   = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        ++count;
+        pos += needle.size();
+    }
+    return count;
+}
+
 // ---------------------------------------------------------------------------
 // TASK-005: calc_extrusion math
 // ---------------------------------------------------------------------------
@@ -177,6 +188,55 @@ TEST_CASE("DrawPathGCodeGenerator: empty session produces preamble and postamble
         pos = (line_end != std::string::npos) ? line_end + 1 : std::string::npos;
     }
     REQUIRE(!has_g1_e);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: profile startup owns heat waits",
+    "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("machine_start_gcode", new ConfigOptionString(
+        "; profile heat start\n"
+        "M190 S[bed_temperature_initial_layer_single] ; profile bed wait\n"
+        "M109 S{first_layer_temperature[0]} ; profile nozzle wait\n"
+        "; profile heat end\n"));
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_centered_box_session(), Vec2d::Zero());
+
+    const std::size_t profile_pos = gcode.find("; profile heat start");
+    REQUIRE(profile_pos != std::string::npos);
+    REQUIRE(gcode.find("M190 S60 ; profile bed wait") != std::string::npos);
+    REQUIRE(gcode.find("M109 S210 ; profile nozzle wait") != std::string::npos);
+
+    // The generator must not insert its generic waits before printer profile
+    // startup; otherwise profiles that already wait would heat twice.
+    REQUIRE(gcode.rfind("M190", profile_pos) == std::string::npos);
+    REQUIRE(gcode.rfind("M109", profile_pos) == std::string::npos);
+    REQUIRE(count_occurrences(gcode, "M190") == 1);
+    REQUIRE(count_occurrences(gcode, "M109") == 1);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: missing or empty profile startup uses fallback heat waits",
+    "[DrawPathGCodeGenerator]")
+{
+    {
+        DynamicPrintConfig cfg = make_test_config();
+        DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+        const std::string gcode = gen.generate(make_centered_box_session(), Vec2d::Zero());
+
+        REQUIRE(count_occurrences(gcode, "M190") == 1);
+        REQUIRE(count_occurrences(gcode, "M109") == 1);
+    }
+
+    {
+        DynamicPrintConfig cfg = make_test_config();
+        cfg.set_key_value("machine_start_gcode", new ConfigOptionString(" \t\r\n"));
+        DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+        const std::string gcode = gen.generate(make_centered_box_session(), Vec2d::Zero());
+
+        REQUIRE(count_occurrences(gcode, "M190") == 1);
+        REQUIRE(count_occurrences(gcode, "M109") == 1);
+    }
 }
 
 TEST_CASE("DrawPathGCodeGenerator: write_gcode_file creates missing parent directories", "[DrawPathGCodeGenerator]")
