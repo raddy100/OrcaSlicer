@@ -190,8 +190,10 @@ TEST_CASE("DrawPathGCodeGenerator: write_gcode_file writes explicit selected des
           "[DrawPathGCodeGenerator]")
 {
     const char* output_path_env = std::getenv("ORCASLICER_DRAW_PATH_GCODE_TEST_OUTPUT_PATH");
-    if (output_path_env == nullptr || output_path_env[0] == '\0')
+    if (output_path_env == nullptr || output_path_env[0] == '\0') {
+        SUCCEED("Optional selected-destination write probe skipped because no output path was provided.");
         return;
+    }
 
     const boost::filesystem::path output_path(output_path_env);
     const std::string             gcode = "G90\n; selected draw path destination\n";
