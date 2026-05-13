@@ -4,6 +4,8 @@
 
 #include <cmath>
 #include <algorithm>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 #include <boost/nowide/fstream.hpp>
 
 #ifndef M_PI
@@ -125,10 +127,57 @@ bool DrawPathGCodeGenerator::can_generate_for_objects(const std::vector<ModelObj
     return contains_only_draw_path_objects(objects) && !collect_batch(objects).empty();
 }
 
-bool DrawPathGCodeGenerator::write_gcode_file(const std::string& path,
-                                              const std::string& gcode,
-                                              std::string*       error_message)
+std::string DrawPathGCodeGenerator::parent_path_for_file(const std::string& path)
 {
+    return boost::filesystem::path(path).parent_path().string();
+}
+
+bool DrawPathGCodeGenerator::ensure_output_directory(const std::string& path,
+                                                     std::string*       error_message)
+{
+    const boost::filesystem::path parent = boost::filesystem::path(path).parent_path();
+    if (parent.empty()) {
+        if (error_message)
+            error_message->clear();
+        return true;
+    }
+
+    boost::system::error_code ec;
+    if (boost::filesystem::exists(parent, ec)) {
+        if (ec) {
+            if (error_message)
+                *error_message = "Cannot check output directory '" + parent.string() + "': " + ec.message();
+            return false;
+        }
+        if (!boost::filesystem::is_directory(parent, ec) || ec) {
+            if (error_message)
+                *error_message = "Output parent path is not a directory: " + parent.string();
+            return false;
+        }
+        if (error_message)
+            error_message->clear();
+        return true;
+    }
+
+    ec.clear();
+    if (!boost::filesystem::create_directories(parent, ec) && ec) {
+        if (error_message)
+            *error_message = "Cannot create output directory '" + parent.string() + "': " + ec.message();
+        return false;
+    }
+
+    if (error_message)
+        error_message->clear();
+    return true;
+}
+
+bool DrawPathGCodeGenerator::write_gcode_file(const std::string& path,
+                                               const std::string& gcode,
+                                               std::string*       error_message)
+{
+    if (!ensure_output_directory(path, error_message))
+        return false;
+
     boost::nowide::ofstream out(path, std::ios::binary);
     if (!out) {
         if (error_message)

@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -164,6 +166,56 @@ TEST_CASE("DrawPathGCodeGenerator: empty session produces preamble and postamble
     }
     REQUIRE(!has_g1_e);
 }
+
+TEST_CASE("DrawPathGCodeGenerator: write_gcode_file creates missing parent directories", "[DrawPathGCodeGenerator]")
+{
+    const boost::filesystem::path temp_root =
+        boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("draw-path-write-%%%%-%%%%");
+    const boost::filesystem::path output_path = temp_root / "nested" / "draw_path.gcode";
+
+    std::string error;
+    REQUIRE(DrawPathGCodeGenerator::write_gcode_file(output_path.string(), "G90\n; draw path\n", &error));
+    REQUIRE(error.empty());
+    REQUIRE(boost::filesystem::exists(output_path));
+
+    std::ifstream in(output_path.string(), std::ios::binary);
+    std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    REQUIRE(contents == "G90\n; draw path\n");
+
+    boost::system::error_code ec;
+    boost::filesystem::remove_all(temp_root, ec);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: write_gcode_file writes explicit selected destination",
+          "[DrawPathGCodeGenerator]")
+{
+    const char* output_path_env = std::getenv("ORCASLICER_DRAW_PATH_GCODE_TEST_OUTPUT_PATH");
+    if (output_path_env == nullptr || output_path_env[0] == '\0')
+        return;
+
+    const boost::filesystem::path output_path(output_path_env);
+    const std::string             gcode = "G90\n; selected draw path destination\n";
+
+    std::string error;
+    REQUIRE(DrawPathGCodeGenerator::write_gcode_file(output_path.string(), gcode, &error));
+    REQUIRE(error.empty());
+    REQUIRE(boost::filesystem::exists(output_path));
+
+    std::ifstream in(output_path.string(), std::ios::binary);
+    std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    REQUIRE(contents == gcode);
+
+    boost::system::error_code ec;
+    boost::filesystem::remove(output_path, ec);
+}
+
+#ifdef _WIN32
+TEST_CASE("DrawPathGCodeGenerator: parent_path_for_file preserves Windows drive destinations", "[DrawPathGCodeGenerator]")
+{
+    REQUIRE(DrawPathGCodeGenerator::parent_path_for_file("G:\\draw_path_output.gcode") == "G:\\");
+    REQUIRE(DrawPathGCodeGenerator::parent_path_for_file("G:\\exports\\draw_path_output.gcode") == "G:\\exports");
+}
+#endif
 
 TEST_CASE("DrawPathGCodeGenerator: single extrusion segment produces exactly one G1 E line", "[DrawPathGCodeGenerator]")
 {

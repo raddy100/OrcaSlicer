@@ -19,6 +19,7 @@
 #include <boost/property_tree/ptree.hpp>
 
 #include "libslic3r/Print.hpp"
+#include "libslic3r/DrawPathGCodeGenerator.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
@@ -1718,6 +1719,9 @@ bool MainFrame::can_export_gcode() const
     // TODO:: add other filters
     PartPlateList &part_plate_list = m_plater->get_partplate_list();
     PartPlate *current_plate = part_plate_list.get_curr_plate();
+    if (current_plate && DrawPathGCodeGenerator::can_generate_for_objects(current_plate->get_objects_on_this_plate()))
+        return true;
+
     if (!current_plate->is_slice_result_ready_for_print())
         return false;
 
@@ -2269,7 +2273,9 @@ bool MainFrame::get_enable_print_status()
     }
     else if (m_print_select == eExportGcode)
     {
-        if (!current_plate->is_slice_result_valid())
+        const bool can_generate_draw_path =
+            current_plate && DrawPathGCodeGenerator::can_generate_for_objects(current_plate->get_objects_on_this_plate());
+        if (!current_plate->is_slice_result_valid() && !can_generate_draw_path)
         {
             enable = false;
         }

@@ -46,6 +46,9 @@ public:
     static bool contains_only_draw_path_objects(const std::vector<ModelObject*>& objects);
     static std::vector<BatchItem> collect_batch(const std::vector<ModelObject*>& objects);
     static bool can_generate_for_objects(const std::vector<ModelObject*>& objects);
+    static std::string parent_path_for_file(const std::string& path);
+    static bool ensure_output_directory(const std::string& path,
+                                        std::string*       error_message = nullptr);
     static bool write_gcode_file(const std::string& path,
                                  const std::string& gcode,
                                  std::string*       error_message = nullptr);

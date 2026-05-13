@@ -3387,7 +3387,16 @@ void PartPlate::update_slice_context(BackgroundSlicingProcess & process)
 // BBS: delay calc gcode path in backup dir
 std::string PartPlate::get_tmp_gcode_path()
 {
-    if (m_tmp_gcode_path.empty()) {
+    bool regenerate_tmp_gcode_path = m_tmp_gcode_path.empty();
+    if (!regenerate_tmp_gcode_path) {
+        boost::system::error_code ec;
+        boost::filesystem::path parent = boost::filesystem::path(m_tmp_gcode_path).parent_path();
+        regenerate_tmp_gcode_path = parent.empty() || !boost::filesystem::exists(parent, ec) || ec;
+        if (regenerate_tmp_gcode_path)
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": discarding stale temporary G-code path %1%") % m_tmp_gcode_path;
+    }
+
+    if (regenerate_tmp_gcode_path) {
         boost::filesystem::path temp_path(m_model->get_backup_path("Metadata"));
         temp_path /= (boost::format(".%1%.%2%.gcode") % get_current_pid() %
                       GLOBAL_PLATE_INDEX++).str();
