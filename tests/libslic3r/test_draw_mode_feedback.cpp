@@ -10,6 +10,7 @@
 
 #include <boost/filesystem/operations.hpp>
 #include <limits>
+#include <memory>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -90,6 +91,33 @@ TEST_CASE("DrawModeFeedback: relative angles and segment nudging", "[DrawModeFee
     REQUIRE_THAT(translated.end.x(), WithinAbs(10.1, 1e-9));
     REQUIRE_THAT(translated.end.y(), WithinAbs(-1.0, 1e-9));
     REQUIRE_THAT(translated.length(), WithinAbs(layer.segments.front().length(), 1e-9));
+}
+
+TEST_CASE("DrawModeFeedback: finds first non-empty restorable draw object", "[DrawModeFeedback]")
+{
+    Model model;
+
+    ModelObject* normal = model.add_object("Normal", "", make_cube(10.0, 10.0, 10.0));
+    normal->add_instance();
+
+    ModelObject* empty_draw = model.add_object("EmptyDraw", "", make_cube(10.0, 10.0, 10.0));
+    empty_draw->add_instance();
+    empty_draw->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+    empty_draw->draw_session = std::make_unique<DrawSession>();
+    empty_draw->draw_session->add_layer(0.2);
+
+    ModelObject* restorable = model.add_object("RestorableDraw", "", make_cube(10.0, 10.0, 10.0));
+    restorable->add_instance();
+    restorable->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+    auto session = std::make_unique<DrawSession>();
+    session->add_layer(0.2);
+    session->layers[0].segments.push_back({ Vec2d(1.0, 2.0), Vec2d(3.0, 4.0), false });
+    restorable->draw_session = std::move(session);
+
+    int object_index = -1;
+    ModelObject* found = draw_find_first_restorable_draw_object(model.objects, &object_index);
+    REQUIRE(found == restorable);
+    REQUIRE(object_index == 2);
 }
 
 TEST_CASE("Draw3mf: round-trip preserves draw mode display preferences", "[Draw3mf][DrawModeFeedback]")

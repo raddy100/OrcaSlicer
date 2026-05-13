@@ -4,8 +4,11 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace Slic3r {
+
+class ModelObject;
 
 // Draw Mode feedback defaults are intentionally independent from nozzle/grid
 // snapping. Grid snapping rounds coordinates; direction snapping constrains the
@@ -55,5 +58,7 @@ int draw_scale_bar_length_pixels(double grid_spacing_mm, double plate_width_mm, 
 
 bool draw_parse_bool_preference(const std::string& value, bool default_value);
 std::string draw_format_bool_preference(bool value);
+
+ModelObject* draw_find_first_restorable_draw_object(const std::vector<ModelObject*>& objects, int* object_index = nullptr);
 
 } // namespace Slic3r

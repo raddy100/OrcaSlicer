@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 
 namespace Slic3r {
 namespace GUI {
@@ -207,6 +208,9 @@ void DrawModePanel::activate(PartPlate* plate)
     m_dragging_ep.reset();
     m_is_dragging   = false;
 
+    if (restore_existing_draw_object(plate))
+        return;
+
     update_banner();
     update_layer_label();
     if (m_canvas) m_canvas->Refresh();
@@ -269,12 +273,37 @@ void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
 
     update_banner();
     update_layer_label();
+    if (m_canvas) m_canvas->Refresh(false);
 }
 
 void DrawModePanel::refresh()
 {
     update_layer_label();
     if (m_canvas) m_canvas->Refresh(false);
+}
+
+bool DrawModePanel::restore_existing_draw_object(PartPlate* plate)
+{
+    if (m_plater == nullptr)
+        return false;
+
+    Model& model = m_plater->model();
+    std::vector<ModelObject*> candidates;
+    if (plate != nullptr)
+        candidates = plate->get_objects_on_this_plate();
+    else
+        candidates = model.objects;
+
+    ModelObject* object = draw_find_first_restorable_draw_object(candidates);
+    if (object == nullptr)
+        return false;
+
+    auto model_it = std::find(model.objects.begin(), model.objects.end(), object);
+    if (model_it == model.objects.end())
+        return false;
+
+    load_for_edit(object, static_cast<int>(std::distance(model.objects.begin(), model_it)));
+    return true;
 }
 
 void DrawModePanel::update_banner()

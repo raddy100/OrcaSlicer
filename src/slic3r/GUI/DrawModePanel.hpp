@@ -154,6 +154,7 @@ private:
     DrawTransform get_draw_transform() const;
 
     // Helpers
+    bool restore_existing_draw_object(PartPlate* plate);
     void update_banner();
     void update_layer_label();
     void dispatch_command(std::unique_ptr<DrawCommand> cmd);

@@ -1,5 +1,7 @@
 #include "DrawModeFeedback.hpp"
 
+#include "Model.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -240,6 +242,23 @@ bool draw_parse_bool_preference(const std::string& value, bool default_value)
 std::string draw_format_bool_preference(bool value)
 {
     return value ? "1" : "0";
+}
+
+ModelObject* draw_find_first_restorable_draw_object(const std::vector<ModelObject*>& objects, int* object_index)
+{
+    if (object_index != nullptr)
+        *object_index = -1;
+
+    for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
+        ModelObject* object = objects[i];
+        if (object != nullptr && object->is_draw_path_object() && object->draw_session != nullptr && !object->draw_session->is_empty()) {
+            if (object_index != nullptr)
+                *object_index = i;
+            return object;
+        }
+    }
+
+    return nullptr;
 }
 
 } // namespace Slic3r
