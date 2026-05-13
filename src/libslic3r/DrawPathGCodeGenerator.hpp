@@ -4,6 +4,7 @@
 #include <vector>
 #include "DrawSession.hpp"
 #include "GCodeWriter.hpp"
+#include "PlaceholderParser.hpp"
 #include "Point.hpp"
 
 namespace Slic3r {
@@ -57,10 +58,23 @@ private:
     GCodeWriter        m_writer;
     DynamicPrintConfig m_config;
     Vec2d              m_plate_origin;
+    PlaceholderParser  m_placeholder_parser;
 
     std::string generate_preamble(const DrawSession& session);
     std::string generate_layer(const DrawLayer& layer, const Vec2d& abs_offset);
-    std::string generate_postamble();
+    std::string generate_postamble(const DrawSession& session);
+    double      max_layer_z(const DrawSession& session) const;
+    void        prepare_placeholder_parser(const DrawSession& session, int layer_num, double layer_z);
+    std::string process_gcode_template(const std::string& name,
+                                       const std::string& templ,
+                                       unsigned int       extruder_id,
+                                       const DynamicConfig* config_override = nullptr) const;
+    std::string process_config_gcode_string(const std::string& key,
+                                            unsigned int       extruder_id,
+                                            const DynamicConfig* config_override = nullptr) const;
+    std::string process_config_gcode_strings(const std::string& key,
+                                             unsigned int       extruder_id,
+                                             const DynamicConfig* config_override = nullptr) const;
 
     // Extrusion volume per mm of travel for a straight segment.
     // Formula: (nozzle_diameter * layer_height) / (pi * (filament_diameter/2)^2)

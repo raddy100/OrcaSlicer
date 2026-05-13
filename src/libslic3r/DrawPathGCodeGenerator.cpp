@@ -1,9 +1,12 @@
 #include "DrawPathGCodeGenerator.hpp"
 
+#include "GCode/GCodeProcessor.hpp"
 #include "Model.hpp"
+#include "PlaceholderParser.hpp"
 
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -30,6 +33,10 @@ DrawPathGCodeGenerator::DrawPathGCodeGenerator(const DynamicPrintConfig& full_co
     // set_extruders() adds extruders but leaves m_curr_extruder_id = -1.
     // toolchange() sets m_curr_extruder_id and m_curr_filament_extruder[0].
     m_writer.toolchange(0);
+
+    // Initialize placeholder parser with the full config.
+    m_placeholder_parser.apply_config(m_config);
+    m_placeholder_parser.update_timestamp();
 }
 
 // ---------------------------------------------------------------------------
@@ -40,7 +47,7 @@ std::string DrawPathGCodeGenerator::generate(const DrawSession& session,
                                               const Vec2d&       instance_offset)
 {
     if (session.is_empty())
-        return generate_preamble(session) + generate_postamble();
+        return generate_preamble(session) + generate_postamble(session);
 
     // Total XY offset to convert plate-relative → absolute machine coords.
     const Vec2d abs_offset = m_plate_origin + instance_offset;
@@ -54,7 +61,7 @@ std::string DrawPathGCodeGenerator::generate(const DrawSession& session,
         gcode += generate_layer(layer, abs_offset);
     }
 
-    gcode += generate_postamble();
+    gcode += generate_postamble(session);
     return gcode;
 }
 
@@ -75,7 +82,7 @@ std::string DrawPathGCodeGenerator::generate_batch(const std::vector<BatchItem>&
         // All empty — still emit preamble + postamble.
         DrawSession empty;
         gcode += generate_preamble(empty);
-        gcode += generate_postamble();
+        gcode += generate_postamble(empty);
         return gcode;
     }
 
@@ -89,7 +96,7 @@ std::string DrawPathGCodeGenerator::generate_batch(const std::vector<BatchItem>&
         }
     }
 
-    gcode += generate_postamble();
+    gcode += generate_postamble(*first_nonempty);
     return gcode;
 }
 
@@ -212,6 +219,11 @@ std::string DrawPathGCodeGenerator::generate_preamble(const DrawSession& session
 {
     std::string out;
 
+    prepare_placeholder_parser(session, 0, 0.0);
+
+    // Process file_start_gcode first, matching the normal slicer ordering.
+    out += process_config_gcode_string("file_start_gcode", 0);
+
     // Standard G-code preamble (G90, G21, M82/M83, reset E).
     out += m_writer.preamble();
     out += m_writer.reset_e(true);
@@ -222,19 +234,18 @@ std::string DrawPathGCodeGenerator::generate_preamble(const DrawSession& session
         out += m_writer.set_temperature(static_cast<unsigned int>(first_layer_temp), /*wait=*/true, /*tool=*/0);
 
     // Bed heat-up (M190). We use hot_plate_temp as a reasonable default.
-    // PRD-MAP: "bed_temperature" → hot_plate_temp (index 0); adjust if a
-    // different bed type is needed in the future.
     const int bed_temp = cfg_int_vec("hot_plate_temp");
     if (bed_temp > 0)
         out += m_writer.set_bed_temperature(bed_temp, /*wait=*/true);
 
-    // Draw mode emits direct, plate-relative toolpaths for preview/simulation
-    // without entering the normal slicing pipeline.  Do not append the printer
-    // start template here: vendor profiles may contain purge/cleanup moves and
-    // unexpanded placeholder conditionals that are valid for full prints, but
-    // can leave the draw work area and trip preview plate-boundary checks for a
-    // simple drawing.
-    out += "; draw mode: custom printer start template suppressed\n";
+    // Process profile start templates with placeholders expanded.  Do not append
+    // raw templates: production printer profiles often contain conditionals and
+    // computed expressions (for example Bambu-style max_layer_z guards).
+    out += process_config_gcode_string("machine_start_gcode", 0);
+    DynamicConfig filament_config;
+    filament_config.set_key_value("filament_extruder_id", new ConfigOptionInt(0));
+    filament_config.set_key_value("layer_num", new ConfigOptionInt(0));
+    out += process_config_gcode_strings("filament_start_gcode", 0, &filament_config);
 
     // Fan on.
     const double fan_min = cfg_float_vec("fan_min_speed");
@@ -320,7 +331,7 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
 // Private: postamble
 // ---------------------------------------------------------------------------
 
-std::string DrawPathGCodeGenerator::generate_postamble()
+std::string DrawPathGCodeGenerator::generate_postamble(const DrawSession& session)
 {
     std::string out;
 
@@ -330,19 +341,181 @@ std::string DrawPathGCodeGenerator::generate_postamble()
     const Vec3d& pos = m_writer.get_position();
     out += m_writer.travel_to_z(pos.z() + 10.0, "nozzle lift");
 
+    const double max_z = max_layer_z(session);
+    prepare_placeholder_parser(session, static_cast<int>(session.layers.size()), max_z);
+
+    // Process profile end templates with the same placeholder context as the
+    // normal slicer path.
+    DynamicConfig filament_config;
+    filament_config.set_key_value("filament_extruder_id", new ConfigOptionInt(0));
+    filament_config.set_key_value("layer_num", new ConfigOptionInt(static_cast<int>(session.layers.size())));
+    filament_config.set_key_value("layer_z", new ConfigOptionFloat(max_z));
+    filament_config.set_key_value("max_layer_z", new ConfigOptionFloat(max_z));
+    out += process_config_gcode_strings("filament_end_gcode", 0, &filament_config);
+    out += process_config_gcode_string("machine_end_gcode", 0, &filament_config);
+
     // Turn heaters off (no wait).
     out += m_writer.set_temperature(0, /*wait=*/false, /*tool=*/0);
 
     // Fan off.
     out += m_writer.set_fan(0u);
 
-    // See generate_preamble(): suppress the printer end template as well, as
-    // Bambu-style cleanup/purge parking moves can be outside a draw-mode work
-    // area's plate bounds and may still contain unsliced placeholders.
-    out += "; draw mode: custom printer end template suppressed\n";
-
     out += m_writer.postamble();
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Private: placeholder expansion helpers
+// ---------------------------------------------------------------------------
+
+double DrawPathGCodeGenerator::max_layer_z(const DrawSession& session) const
+{
+    double max_z = 0.0;
+    for (const DrawLayer& layer : session.layers)
+        max_z = std::max(max_z, layer.z_end);
+    return max_z;
+}
+
+void DrawPathGCodeGenerator::prepare_placeholder_parser(const DrawSession& session,
+                                                        int                layer_num,
+                                                        double             layer_z)
+{
+    const double max_z = max_layer_z(session);
+    const int    extruder_id = 0;
+
+    m_placeholder_parser.set("max_layer_z", max_z);
+    m_placeholder_parser.set("layer_num", layer_num);
+    m_placeholder_parser.set("layer_z", layer_z);
+    m_placeholder_parser.set("total_layer_count", static_cast<int>(session.layers.size()));
+
+    // Draw-mode exports currently use the first active filament/extruder.  The
+    // printer profile templates nevertheless expect the same symbols that the
+    // normal slicer defines after it computes tool ordering.
+    m_placeholder_parser.set("initial_tool", extruder_id);
+    m_placeholder_parser.set("initial_extruder", extruder_id);
+    m_placeholder_parser.set("initial_no_support_tool", extruder_id);
+    m_placeholder_parser.set("initial_no_support_extruder", extruder_id);
+    m_placeholder_parser.set("current_extruder", extruder_id);
+    m_placeholder_parser.set("first_tools", new ConfigOptionInts({extruder_id}));
+    m_placeholder_parser.set("first_filaments", new ConfigOptionInts({extruder_id}));
+    m_placeholder_parser.set("first_non_support_tools", new ConfigOptionInts({extruder_id}));
+    m_placeholder_parser.set("first_non_support_filaments", new ConfigOptionInts({extruder_id}));
+    m_placeholder_parser.set("has_wipe_tower", false);
+    m_placeholder_parser.set("has_single_extruder_multi_material_priming", false);
+    m_placeholder_parser.set("total_toolchanges", 0);
+    m_placeholder_parser.set("current_object_idx", 0);
+
+    int num_extruders = 1;
+    if (const auto* nozzles = dynamic_cast<const ConfigOptionFloats*>(m_config.option("nozzle_diameter")))
+        num_extruders = std::max<int>(1, static_cast<int>(nozzles->values.size()));
+    m_placeholder_parser.set("num_extruders", num_extruders);
+    std::vector<unsigned char> is_extruder_used(static_cast<size_t>(std::max(num_extruders, 1)), false);
+    is_extruder_used.front() = true;
+    m_placeholder_parser.set("is_extruder_used", new ConfigOptionBools(is_extruder_used));
+
+    // Bed geometry variables are frequently used by purge/start templates.
+    double bed_min_x = 0.0, bed_min_y = 0.0, bed_max_x = 0.0, bed_max_y = 0.0;
+    if (const auto* printable_area = dynamic_cast<const ConfigOptionPoints*>(m_config.option("printable_area"));
+        printable_area && !printable_area->values.empty()) {
+        bed_min_x = bed_max_x = printable_area->values.front().x();
+        bed_min_y = bed_max_y = printable_area->values.front().y();
+        for (const Vec2d& p : printable_area->values) {
+            bed_min_x = std::min(bed_min_x, p.x());
+            bed_min_y = std::min(bed_min_y, p.y());
+            bed_max_x = std::max(bed_max_x, p.x());
+            bed_max_y = std::max(bed_max_y, p.y());
+        }
+    }
+    m_placeholder_parser.set("print_bed_min", new ConfigOptionFloats({bed_min_x, bed_min_y}));
+    m_placeholder_parser.set("print_bed_max", new ConfigOptionFloats({bed_max_x, bed_max_y}));
+    m_placeholder_parser.set("print_bed_size", new ConfigOptionFloats({bed_max_x - bed_min_x, bed_max_y - bed_min_y}));
+
+    // Temperature aliases used by Orca/Bambu profile G-code.  Prefer the
+    // currently selected bed type, falling back to the hot-plate settings used
+    // by the earlier draw-mode preamble.
+    BedType bed_type = btPEI;
+    if (const ConfigOption* bed_type_opt = m_config.option("curr_bed_type"))
+        bed_type = static_cast<BedType>(bed_type_opt->getInt());
+
+    const std::string first_bed_key = get_bed_temp_1st_layer_key(bed_type);
+    const std::string bed_key       = get_bed_temp_key(bed_type);
+    const ConfigOptionInts* first_bed_opt = first_bed_key.empty() ? nullptr : dynamic_cast<const ConfigOptionInts*>(m_config.option(first_bed_key));
+    const ConfigOptionInts* bed_opt       = bed_key.empty()       ? nullptr : dynamic_cast<const ConfigOptionInts*>(m_config.option(bed_key));
+    if (!first_bed_opt)
+        first_bed_opt = dynamic_cast<const ConfigOptionInts*>(m_config.option("hot_plate_temp_initial_layer"));
+    if (!bed_opt)
+        bed_opt = dynamic_cast<const ConfigOptionInts*>(m_config.option("hot_plate_temp"));
+
+    const int first_bed_temp = first_bed_opt && !first_bed_opt->values.empty() ? first_bed_opt->values.front() : cfg_int_vec("hot_plate_temp");
+    if (first_bed_opt)
+        m_placeholder_parser.set("bed_temperature_initial_layer", new ConfigOptionInts(*first_bed_opt));
+    else
+        m_placeholder_parser.set("bed_temperature_initial_layer", new ConfigOptionInts({first_bed_temp}));
+    if (bed_opt)
+        m_placeholder_parser.set("bed_temperature", new ConfigOptionInts(*bed_opt));
+    else
+        m_placeholder_parser.set("bed_temperature", new ConfigOptionInts({cfg_int_vec("hot_plate_temp")}));
+    m_placeholder_parser.set("bed_temperature_initial_layer_single", first_bed_temp);
+    m_placeholder_parser.set("first_layer_bed_temperature", new ConfigOptionInts({first_bed_temp}));
+    if (const auto* nozzle_temps = dynamic_cast<const ConfigOptionInts*>(m_config.option("nozzle_temperature_initial_layer")))
+        m_placeholder_parser.set("first_layer_temperature", new ConfigOptionInts(*nozzle_temps));
+
+    if (const auto* chamber = dynamic_cast<const ConfigOptionInts*>(m_config.option("chamber_temperature"))) {
+        int max_chamber = 0;
+        for (int temp : chamber->values)
+            max_chamber = std::max(max_chamber, temp);
+        m_placeholder_parser.set("chamber_temperature", new ConfigOptionInts(*chamber));
+        m_placeholder_parser.set("overall_chamber_temperature", max_chamber);
+    }
+
+    m_placeholder_parser.set("max_print_height", static_cast<int>(std::ceil(cfg_float("printable_height"))));
+    m_placeholder_parser.set("max_print_z", static_cast<int>(std::ceil(max_z)));
+    m_placeholder_parser.set("z_offset", cfg_float("z_offset"));
+    m_placeholder_parser.set("print_time_sec", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Sec_Placeholder));
+    m_placeholder_parser.set("used_filament_length", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Used_Filament_Length_Placeholder));
+
+    const Vec3d& pos = m_writer.get_position();
+    m_placeholder_parser.set("position", new ConfigOptionFloats({pos.x(), pos.y(), pos.z()}));
+}
+
+std::string DrawPathGCodeGenerator::process_gcode_template(const std::string& name,
+                                                           const std::string& templ,
+                                                           unsigned int       extruder_id,
+                                                           const DynamicConfig* config_override) const
+{
+    if (templ.empty())
+        return "";
+
+    try {
+        std::string expanded = m_placeholder_parser.process(templ, extruder_id, config_override);
+        if (!expanded.empty() && expanded.back() != '\n')
+            expanded += '\n';
+        return expanded;
+    } catch (const std::exception& e) {
+        // A failed profile template should not crash exporting, but it must be
+        // visible in the output so the user can fix the preset.
+        return "; ERROR: Failed to process " + name + ": " + e.what() + "\n";
+    }
+}
+
+std::string DrawPathGCodeGenerator::process_config_gcode_string(const std::string& key,
+                                                                unsigned int       extruder_id,
+                                                                const DynamicConfig* config_override) const
+{
+    const auto* opt = dynamic_cast<const ConfigOptionString*>(m_config.option(key));
+    return opt ? process_gcode_template(key, opt->value, extruder_id, config_override) : "";
+}
+
+std::string DrawPathGCodeGenerator::process_config_gcode_strings(const std::string& key,
+                                                                 unsigned int       extruder_id,
+                                                                 const DynamicConfig* config_override) const
+{
+    const auto* opt = dynamic_cast<const ConfigOptionStrings*>(m_config.option(key));
+    if (!opt || opt->values.empty())
+        return "";
+
+    const size_t idx = std::min<size_t>(extruder_id, opt->values.size() - 1);
+    return process_gcode_template(key, opt->values[idx], extruder_id, config_override);
 }
 
 // ---------------------------------------------------------------------------

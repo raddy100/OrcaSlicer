@@ -27,6 +27,7 @@ static DynamicPrintConfig make_test_config(double nozzle_d = 0.4,
     DynamicPrintConfig cfg;
     // gcode_flavor (needed by GCodeWriter preamble formatting)
     cfg.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(gcfMarlinLegacy));
+    cfg.set_key_value("printer_model", new ConfigOptionString("Unit Test Printer"));
 
     // Nozzle geometry
     cfg.set_key_value("nozzle_diameter",  new ConfigOptionFloats({ nozzle_d }));
@@ -36,14 +37,25 @@ static DynamicPrintConfig make_test_config(double nozzle_d = 0.4,
     cfg.set_key_value("nozzle_temperature",               new ConfigOptionInts({ 200 }));
     cfg.set_key_value("nozzle_temperature_initial_layer", new ConfigOptionInts({ 210 }));
     cfg.set_key_value("hot_plate_temp",                   new ConfigOptionInts({ 60 }));
+    cfg.set_key_value("hot_plate_temp_initial_layer",     new ConfigOptionInts({ 60 }));
+    cfg.set_key_value("curr_bed_type",                    new ConfigOptionEnum<BedType>(btPEI));
+    cfg.set_key_value("chamber_temperature",              new ConfigOptionInts({ 0 }));
+    cfg.set_key_value("printable_height",                 new ConfigOptionFloat(250.0));
+    cfg.set_key_value("printable_area",                   new ConfigOptionPoints({
+        Vec2d(0.0, 0.0), Vec2d(250.0, 0.0), Vec2d(250.0, 250.0), Vec2d(0.0, 250.0) }));
 
     // Speeds (mm/s)
     cfg.set_key_value("outer_wall_speed",    new ConfigOptionFloat(50.0));
     cfg.set_key_value("initial_layer_speed", new ConfigOptionFloat(30.0));
+    cfg.set_key_value("outer_wall_acceleration", new ConfigOptionFloat(1000.0));
 
     // Retraction
     cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.8 }));
     cfg.set_key_value("retraction_speed",  new ConfigOptionFloats({ 45.0 }));
+    cfg.set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats({ 8.0 }));
+    cfg.set_key_value("filament_type", new ConfigOptionStrings({ "PLA" }));
+    cfg.set_key_value("enable_pressure_advance", new ConfigOptionBools({ false }));
+    cfg.set_key_value("pressure_advance", new ConfigOptionFloats({ 0.02 }));
 
     // Process
     cfg.set_key_value("layer_height",     new ConfigOptionFloat(layer_h));
@@ -429,25 +441,31 @@ TEST_CASE("DrawPathGCodeGenerator: draw mode suppresses unsafe machine templates
         "G1 X202 Y250\n"
         "{endif}"));
     cfg.set_key_value("machine_end_gcode", new ConfigOptionString(
+        "{if max_layer_z > 50}\n"
         "G1 X202 Y250 F12000 ; cleanup\n"
         "G1 Y264.5 F3000\n"
-        "{if max_layer_z > 50}M400{endif}"));
+        "M400\n"
+        "{endif}"));
 
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
     const std::string gcode = gen.generate(make_centered_box_session(), Vec2d(10.0, 10.0));
 
-    REQUIRE(gcode.find("; draw mode: custom printer start template suppressed") != std::string::npos);
-    REQUIRE(gcode.find("; draw mode: custom printer end template suppressed") != std::string::npos);
+    // Verify that machine start/end templates are now EXPANDED, not suppressed.
+    REQUIRE(gcode.find("G28") != std::string::npos); // Start gcode should be present
+    REQUIRE(gcode.find("X202 Y-3") != std::string::npos); // Purge move should be present
 
-    // The draw generator must not pass unsliced printer templates through to the
-    // preview/completion path.  Bambu profiles commonly use these cleanup/purge
-    // coordinates and placeholder conditionals in start/end G-code.
-    REQUIRE(gcode.find("X202") == std::string::npos);
-    REQUIRE(gcode.find("Y250") == std::string::npos);
+    // The conditional should be evaluated (max_layer_z for a 2mm box is ~0.6, so < 50).
+    // The moves inside the {if} blocks should NOT appear since max_layer_z < 50.
+    REQUIRE(gcode.find("X202 Y250") == std::string::npos);
     REQUIRE(gcode.find("Y264.5") == std::string::npos);
+    REQUIRE(gcode.find("M400") == std::string::npos);
+
+    // Unexpanded placeholders should NOT appear in the output.
     REQUIRE(gcode.find("{if") == std::string::npos);
     REQUIRE(gcode.find("max_layer_z") == std::string::npos);
+    REQUIRE(gcode.find("{endif}") == std::string::npos);
 
+    // Verify that draw extrusion moves are still within the expected range.
     bool found_xy = false;
     std::size_t pos = 0;
     while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
@@ -457,15 +475,20 @@ TEST_CASE("DrawPathGCodeGenerator: draw mode suppresses unsafe machine templates
 
         const auto xv = extract_axis_value(line, 'X');
         const auto yv = extract_axis_value(line, 'Y');
-        if (xv) {
-            found_xy = true;
-            REQUIRE(*xv >= 2.0);
-            REQUIRE(*xv <= 18.0);
-        }
-        if (yv) {
-            found_xy = true;
-            REQUIRE(*yv >= 2.0);
-            REQUIRE(*yv <= 18.0);
+        const auto ev = extract_axis_value(line, 'E');
+
+        // Only check coordinates for extrusion moves (those with E values).
+        if (ev && *ev > 0.0) {
+            if (xv) {
+                found_xy = true;
+                REQUIRE(*xv >= 2.0);
+                REQUIRE(*xv <= 18.0);
+            }
+            if (yv) {
+                found_xy = true;
+                REQUIRE(*yv >= 2.0);
+                REQUIRE(*yv <= 18.0);
+            }
         }
 
         pos = line_end + 1;
@@ -475,7 +498,7 @@ TEST_CASE("DrawPathGCodeGenerator: draw mode suppresses unsafe machine templates
     GCodeProcessor processor;
     PrintConfig processor_config;
     processor.apply_config(processor_config);
-    processor.initialize("draw-path-template-suppression.gcode");
+    processor.initialize("draw-path-template-expansion.gcode");
     processor.initialize_result_moves();
     processor.process_buffer(gcode);
     processor.finalize(false);
@@ -487,12 +510,101 @@ TEST_CASE("DrawPathGCodeGenerator: draw mode suppresses unsafe machine templates
             continue;
 
         found_extrusion_move = true;
+        // Draw extrusions should still be within the centered box bounds.
         REQUIRE(move.position.x() >= 2.0f);
         REQUIRE(move.position.x() <= 18.0f);
         REQUIRE(move.position.y() >= 2.0f);
         REQUIRE(move.position.y() <= 18.0f);
     }
     REQUIRE(found_extrusion_move);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: placeholder expansion in start/end templates",
+    "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("machine_start_gcode", new ConfigOptionString(
+        "; Start template test\n"
+        "; max_layer_z = [max_layer_z]\n"
+        "G28 ; home\n"));
+    cfg.set_key_value("machine_end_gcode", new ConfigOptionString(
+        "; End template test\n"
+        "; max_layer_z = [max_layer_z]\n"
+        "{if max_layer_z < 10}; Low height detected{endif}\n"
+        "M84 ; disable motors\n"));
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_centered_box_session(), Vec2d::Zero());
+
+    // Verify start template is present and expanded.
+    REQUIRE(gcode.find("; Start template test") != std::string::npos);
+    REQUIRE(gcode.find("G28 ; home") != std::string::npos);
+
+    // Verify end template is present and expanded.
+    REQUIRE(gcode.find("; End template test") != std::string::npos);
+    REQUIRE(gcode.find("M84 ; disable motors") != std::string::npos);
+
+    // The conditional should be evaluated (max_layer_z for a box is small).
+    REQUIRE(gcode.find("; Low height detected") != std::string::npos);
+
+    // No unexpanded placeholders should remain.
+    REQUIRE(gcode.find("{if") == std::string::npos);
+    REQUIRE(gcode.find("{endif}") == std::string::npos);
+
+    // The [max_layer_z] placeholder should be replaced with an actual number.
+    // We don't check the exact value, but ensure the placeholder itself is gone.
+    const std::size_t start_pos = gcode.find("; max_layer_z =");
+    REQUIRE(start_pos != std::string::npos);
+    const std::size_t end_of_line = gcode.find('\n', start_pos);
+    const std::string line = gcode.substr(start_pos, end_of_line - start_pos);
+    REQUIRE(line.find("[max_layer_z]") == std::string::npos); // Should be expanded
+}
+
+TEST_CASE("DrawPathGCodeGenerator: Orca profile placeholders and filament gcodes are expanded",
+    "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("machine_start_gcode", new ConfigOptionString(
+        ";printer_model:[printer_model]\n"
+        ";initial_filament:{filament_type[initial_extruder]}\n"
+        "M140 S[bed_temperature_initial_layer_single]\n"
+        "{if filament_type[initial_no_support_extruder]==\"PLA\"}M106 P3 S150{endif}\n"
+        "M204 S{min(20000,max(1000,outer_wall_acceleration))}\n"
+        "G1 X{print_bed_max[0]*0.5} Y-1.2 F20000\n"
+        "SET_PRINT_STATS_INFO TOTAL_LAYER=[total_layer_count]\n"));
+    cfg.set_key_value("filament_start_gcode", new ConfigOptionStrings({
+        "; Filament start T[filament_extruder_id]\n" }));
+    cfg.set_key_value("filament_end_gcode", new ConfigOptionStrings({
+        "; Filament end layer [layer_num] max [max_layer_z]\n" }));
+    cfg.set_key_value("machine_end_gcode", new ConfigOptionString(
+        "{if max_layer_z > 50}G1 Z{min(max_layer_z+50, printable_height+0.5)} F20000{else}G1 Z100 F20000{endif}\n"
+        "M84\n"));
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_centered_box_session(), Vec2d::Zero());
+
+    REQUIRE(gcode.find("; ERROR: Failed to process") == std::string::npos);
+    REQUIRE(gcode.find("{if") == std::string::npos);
+    REQUIRE(gcode.find("[") == std::string::npos);
+    REQUIRE(gcode.find("M140 S60") != std::string::npos);
+    REQUIRE(gcode.find("M106 P3 S150") != std::string::npos);
+    REQUIRE(gcode.find("M204 S1000") != std::string::npos);
+    REQUIRE(gcode.find("G1 X125") != std::string::npos);
+    REQUIRE(gcode.find("SET_PRINT_STATS_INFO TOTAL_LAYER=1") != std::string::npos);
+    REQUIRE(gcode.find("; Filament start T0") != std::string::npos);
+    REQUIRE(gcode.find("; Filament end layer 1 max ") != std::string::npos);
+    REQUIRE(gcode.find("G1 Z100 F20000") != std::string::npos);
+    REQUIRE(gcode.find("M84") != std::string::npos);
+    REQUIRE(gcode.find("draw extrude") != std::string::npos);
+
+    GCodeProcessor processor;
+    PrintConfig processor_config;
+    processor.apply_config(processor_config);
+    processor.initialize("draw-path-orca-profile-placeholders.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+    processor.finalize(false);
+    REQUIRE(!processor.get_result().moves.empty());
 }
 
 TEST_CASE("DrawPathGCodeGenerator: plate_origin shifts all XY coordinates", "[DrawPathGCodeGenerator]")
