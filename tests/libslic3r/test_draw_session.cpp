@@ -9,6 +9,7 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 
 #include <boost/filesystem/operations.hpp>
+#include <memory>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -293,7 +294,115 @@ DrawSegment make_seg(double x0, double y0, double x1, double y1)
     s.is_travel = false;
     return s;
 }
+
+std::unique_ptr<DrawSession> make_draw_session_for_copy_tests(double x_end)
+{
+    auto session = std::make_unique<DrawSession>();
+    session->add_layer(0.2);
+    session->layers[0].segments.push_back(make_seg(0.0, 0.0, x_end, 0.0));
+    session->add_layer(0.3);
+    session->layers[1].segments.push_back(make_seg(x_end, 0.0, x_end, 5.0));
+    return session;
+}
+
+void require_sessions_equal(const DrawSession& lhs, const DrawSession& rhs)
+{
+    REQUIRE(lhs.layer_count() == rhs.layer_count());
+    REQUIRE(lhs.active_layer == rhs.active_layer);
+    for (size_t layer_idx = 0; layer_idx < lhs.layers.size(); ++layer_idx) {
+        const DrawLayer& lhs_layer = lhs.layers[layer_idx];
+        const DrawLayer& rhs_layer = rhs.layers[layer_idx];
+        REQUIRE(lhs_layer.layer_index == rhs_layer.layer_index);
+        REQUIRE_THAT(lhs_layer.z_start, WithinAbs(rhs_layer.z_start, 1e-6));
+        REQUIRE_THAT(lhs_layer.z_end,   WithinAbs(rhs_layer.z_end,   1e-6));
+        REQUIRE(lhs_layer.segments.size() == rhs_layer.segments.size());
+        for (size_t seg_idx = 0; seg_idx < lhs_layer.segments.size(); ++seg_idx) {
+            const DrawSegment& lhs_seg = lhs_layer.segments[seg_idx];
+            const DrawSegment& rhs_seg = rhs_layer.segments[seg_idx];
+            REQUIRE(lhs_seg.is_travel == rhs_seg.is_travel);
+            REQUIRE_THAT(lhs_seg.start.x(), WithinAbs(rhs_seg.start.x(), 1e-6));
+            REQUIRE_THAT(lhs_seg.start.y(), WithinAbs(rhs_seg.start.y(), 1e-6));
+            REQUIRE_THAT(lhs_seg.end.x(),   WithinAbs(rhs_seg.end.x(),   1e-6));
+            REQUIRE_THAT(lhs_seg.end.y(),   WithinAbs(rhs_seg.end.y(),   1e-6));
+        }
+    }
+}
 } // anonymous namespace
+
+TEST_CASE("DrawSession: ModelObject copy preserves draw session independently", "[DrawSession][Draw3mf]")
+{
+    Model model;
+    ModelObject* src = model.add_object("DrawPathObject", "", make_cube(2.0, 2.0, 0.4));
+    src->add_instance();
+    src->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+    src->draw_session = make_draw_session_for_copy_tests(8.0);
+
+    ModelObject* copy = model.add_object(*src);
+
+    REQUIRE(copy->is_draw_path_object());
+    REQUIRE(copy->draw_session != nullptr);
+    REQUIRE(copy->draw_session.get() != src->draw_session.get());
+    require_sessions_equal(*src->draw_session, *copy->draw_session);
+
+    copy->draw_session->layers[0].segments[0].end = Vec2d(99.0, 99.0);
+    REQUIRE_THAT(src->draw_session->layers[0].segments[0].end.x(), WithinAbs(8.0, 1e-6));
+    REQUIRE_THAT(src->draw_session->layers[0].segments[0].end.y(), WithinAbs(0.0, 1e-6));
+}
+
+TEST_CASE("Draw3mf: legacy copied draw-path objects recover the only serialized session", "[Draw3mf]")
+{
+    Model src_model;
+
+    ModelObject* source = src_model.add_object("DrawPathObject", "", make_cube(2.0, 2.0, 0.4));
+    source->add_instance();
+    source->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+    source->draw_session = make_draw_session_for_copy_tests(7.0);
+
+    ModelObject* legacy_copy = src_model.add_object(*source);
+    legacy_copy->instances.front()->set_offset(Vec3d(20.0, 0.0, 0.0));
+    legacy_copy->draw_session.reset(); // Simulates projects saved by the broken GUI copy path.
+
+    namespace fs = boost::filesystem;
+    const fs::path tmp = fs::temp_directory_path() / fs::unique_path("orca_test_draw_legacy_copy_%%%%-%%%%.3mf");
+
+    DynamicPrintConfig store_cfg;
+    const std::string tmp_string = tmp.string();
+    StoreParams sp;
+    sp.path   = tmp_string.c_str();
+    sp.model  = &src_model;
+    sp.config = &store_cfg;
+
+    const bool stored = store_bbs_3mf(sp);
+    REQUIRE(stored);
+    REQUIRE(fs::exists(tmp));
+
+    Model dst_model;
+    DynamicPrintConfig dst_cfg;
+    ConfigSubstitutionContext ctx{ ForwardCompatibilitySubstitutionRule::Disable };
+    PlateDataPtrs plate_data;
+    bool is_bbl = false, is_orca = false;
+    Semver ver;
+
+    const bool loaded = load_bbs_3mf(
+        tmp_string.c_str(),
+        &dst_cfg, &ctx, &dst_model,
+        &plate_data,
+        /*project_presets=*/nullptr,
+        &is_bbl, &is_orca, &ver,
+        /*proFn=*/nullptr,
+        LoadStrategy::LoadModel);
+
+    fs::remove(tmp);
+    release_PlateData_list(plate_data);
+
+    REQUIRE(loaded);
+    REQUIRE(dst_model.objects.size() == 2);
+    REQUIRE(dst_model.objects[0]->draw_session != nullptr);
+    REQUIRE(dst_model.objects[1]->draw_session != nullptr);
+    REQUIRE(dst_model.objects[0]->draw_session.get() != dst_model.objects[1]->draw_session.get());
+    require_sessions_equal(*dst_model.objects[0]->draw_session, *dst_model.objects[1]->draw_session);
+    require_sessions_equal(*source->draw_session, *dst_model.objects[1]->draw_session);
+}
 
 TEST_CASE("DrawSession::remove_layer - empty session returns false", "[DrawSession]")
 {

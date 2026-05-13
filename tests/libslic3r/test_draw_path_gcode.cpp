@@ -463,6 +463,8 @@ TEST_CASE("DrawPathGCodeGenerator: draw-path plate helpers require all objects t
     ModelObject* draw_object = model.add_object("DrawPathObject", "", make_cube(1.0, 1.0, 1.0));
     ModelInstance* draw_instance = draw_object->add_instance();
     draw_instance->set_offset(Vec3d(11.0, 22.0, 0.0));
+    ModelInstance* second_draw_instance = draw_object->add_instance();
+    second_draw_instance->set_offset(Vec3d(33.0, 44.0, 0.0));
     draw_object->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
 
     auto draw_session = std::make_unique<DrawSession>();
@@ -470,14 +472,24 @@ TEST_CASE("DrawPathGCodeGenerator: draw-path plate helpers require all objects t
     draw_session->layers.front().segments.push_back({ Vec2d(0.0, 0.0), Vec2d(5.0, 0.0), false });
     draw_object->draw_session = std::move(draw_session);
 
-    ModelObjectPtrs objects { draw_object };
+    ModelObject* copied_draw_object = model.add_object(*draw_object);
+    copied_draw_object->instances.front()->set_offset(Vec3d(55.0, 66.0, 0.0));
+    copied_draw_object->delete_instance(1);
+
+    ModelObjectPtrs objects { draw_object, copied_draw_object };
     REQUIRE(DrawPathGCodeGenerator::contains_only_draw_path_objects(objects));
 
     std::vector<DrawPathGCodeGenerator::BatchItem> batch = DrawPathGCodeGenerator::collect_batch(objects);
-    REQUIRE(batch.size() == 1);
-    REQUIRE(batch.front().first == draw_object->draw_session.get());
-    REQUIRE_THAT(batch.front().second.x(), Catch::Matchers::WithinAbs(11.0, 1e-9));
-    REQUIRE_THAT(batch.front().second.y(), Catch::Matchers::WithinAbs(22.0, 1e-9));
+    REQUIRE(batch.size() == 3);
+    REQUIRE(batch[0].first == draw_object->draw_session.get());
+    REQUIRE_THAT(batch[0].second.x(), Catch::Matchers::WithinAbs(11.0, 1e-9));
+    REQUIRE_THAT(batch[0].second.y(), Catch::Matchers::WithinAbs(22.0, 1e-9));
+    REQUIRE(batch[1].first == draw_object->draw_session.get());
+    REQUIRE_THAT(batch[1].second.x(), Catch::Matchers::WithinAbs(33.0, 1e-9));
+    REQUIRE_THAT(batch[1].second.y(), Catch::Matchers::WithinAbs(44.0, 1e-9));
+    REQUIRE(batch[2].first == copied_draw_object->draw_session.get());
+    REQUIRE_THAT(batch[2].second.x(), Catch::Matchers::WithinAbs(55.0, 1e-9));
+    REQUIRE_THAT(batch[2].second.y(), Catch::Matchers::WithinAbs(66.0, 1e-9));
 
     ModelObject* normal_object = model.add_object("NormalObject", "", make_cube(1.0, 1.0, 1.0));
     normal_object->add_instance();

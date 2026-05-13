@@ -2157,6 +2157,37 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
         }
 
+        // Legacy Draw Mode recovery: older copy/paste builds could duplicate the
+        // draw_path_object config flag without copying the raw DrawSession. Such
+        // projects were then saved with multiple draw-path objects but only one
+        // Metadata/draw_session_obj_N.xml entry. If exactly one usable draw
+        // session was restored, treat flagged draw-path objects without session
+        // data as pasted copies of that source so direct DrawPathGCodeGenerator
+        // output and subsequent 3MF saves remain complete. Ambiguous projects
+        // with multiple distinct source sessions are left untouched.
+        const DrawSession* single_draw_session = nullptr;
+        size_t draw_sessions_present = 0;
+        size_t draw_sessions_missing = 0;
+        for (const ModelObject* o : model.objects) {
+            if (!o->is_draw_path_object())
+                continue;
+            if (o->draw_session) {
+                single_draw_session = o->draw_session.get();
+                ++draw_sessions_present;
+            } else {
+                ++draw_sessions_missing;
+            }
+        }
+        if (draw_sessions_missing > 0 && draw_sessions_present == 1 && single_draw_session != nullptr) {
+            for (ModelObject* o : model.objects)
+                if (o->is_draw_path_object() && !o->draw_session)
+                    o->draw_session = std::make_unique<DrawSession>(*single_draw_session);
+
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__
+                << boost::format(", recovered %1% pasted draw-path object(s) from the only serialized draw session")
+                % draw_sessions_missing;
+        }
+
         // If instances contain a single volume, the volume offset should be 0,0,0
         // This equals to say that instance world position and volume world position should match
         // Correct all instances/volumes for which this does not hold

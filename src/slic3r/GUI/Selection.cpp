@@ -2134,6 +2134,9 @@ void Selection::copy_to_clipboard()
         dst_object->layer_config_ranges  = src_object->layer_config_ranges;     // #ys_FIXME_experiment
         dst_object->layer_height_profile.assign(src_object->layer_height_profile);
         dst_object->origin_translation   = src_object->origin_translation;
+        dst_object->draw_session         = src_object->draw_session
+            ? std::make_unique<DrawSession>(*src_object->draw_session)
+            : nullptr;
 
         for (int i : object.second) {
             dst_object->add_instance(*src_object->instances[i]);
