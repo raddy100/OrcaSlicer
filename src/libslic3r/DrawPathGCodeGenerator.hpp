@@ -1,11 +1,14 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include "DrawSession.hpp"
 #include "GCodeWriter.hpp"
 #include "Point.hpp"
 
 namespace Slic3r {
+
+class ModelObject;
 
 // Converts a DrawSession into a complete, machine-ready G-code string using
 // the existing GCodeWriter class.  All print parameters are read from
@@ -33,6 +36,15 @@ public:
     // duplicate homing sequences.
     using BatchItem = std::pair<const DrawSession*, Vec2d>;
     std::string generate_batch(const std::vector<BatchItem>& items);
+
+    // Helpers shared by the GUI background slicing path and tests. A draw-path
+    // plate is handled outside the normal slicer only if every object on the
+    // candidate plate is a draw-path object. Batch collection is stricter and
+    // only returns objects that also have the raw DrawSession data required by
+    // this generator.
+    static bool is_draw_path_object(const ModelObject* object);
+    static bool contains_only_draw_path_objects(const std::vector<ModelObject*>& objects);
+    static std::vector<BatchItem> collect_batch(const std::vector<ModelObject*>& objects);
 
 private:
     GCodeWriter        m_writer;

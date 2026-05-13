@@ -202,6 +202,7 @@ void BackgroundSlicingProcess::process_fff()
     PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
     m_fff_print->is_BBL_printer() = preset_bundle.is_bbl_vendor();
 
+	const bool draw_path_requested = consume_draw_path_gcode_request();
 	// --- DRAW MODE: check first, before the "reuse finished print" early-exit. ---
 	// If every object on the current plate is a draw-path object we generate G-code
 	// directly via DrawPathGCodeGenerator and skip the entire normal slicing pipeline.
@@ -209,38 +210,50 @@ void BackgroundSlicingProcess::process_fff()
 	// normal model sliced previously and then pressed Simulate in Draw Mode); without
 	// this guard the finished-print early-exit below would serve stale Arachne G-code.
 	{
-	    ModelObjectPtrs plate_objects = m_current_plate->get_objects_on_this_plate();
-	    const bool all_draw_path = !plate_objects.empty() &&
-	        std::all_of(plate_objects.begin(), plate_objects.end(),
-	            [](const ModelObject* o) { return o->is_draw_path_object(); });
+	    ModelObjectPtrs plate_objects = m_current_plate ? m_current_plate->get_objects_on_this_plate() : ModelObjectPtrs();
+	    bool all_draw_path = DrawPathGCodeGenerator::contains_only_draw_path_objects(plate_objects);
+
+	    if (draw_path_requested && !all_draw_path) {
+	        // Draw Mode "Simulate" is explicit: do not fall through to stale
+	        // finished G-code or to normal Arachne slicing. If current-plate
+	        // membership is not ready yet after apply_session_to_model(), fall
+	        // back only when the applied print model is unambiguously draw-path.
+	        ModelObjectPtrs print_objects = m_print->model().objects;
+	        if (DrawPathGCodeGenerator::contains_only_draw_path_objects(print_objects)) {
+	            BOOST_LOG_TRIVIAL(info) << __FUNCTION__
+	                << boost::format(" %1%: draw-path request using print-model objects because current plate detection was not ready") % __LINE__;
+	            plate_objects = std::move(print_objects);
+	            all_draw_path = true;
+	        }
+	    }
 
 	    if (all_draw_path) {
 	        BOOST_LOG_TRIVIAL(info) << __FUNCTION__
-	            << boost::format(" %1%: draw-path plate detected — generating G-code via DrawPathGCodeGenerator") % __LINE__;
+	            << boost::format(" %1%: draw-path plate detected (requested=%2%) — generating G-code via DrawPathGCodeGenerator") % __LINE__ % draw_path_requested;
 	        m_gcode_result->reset();
 	        m_fff_print->set_status(10, _utf8(L("Generating draw-path G-code...")));
 
 	        DynamicPrintConfig config = wxGetApp().preset_bundle->full_config();
-	        const Vec3d        origin = m_current_plate->get_origin();
+	        const Vec3d        origin = m_current_plate ? m_current_plate->get_origin() : Vec3d::Zero();
 	        DrawPathGCodeGenerator gen(config, Vec2d(origin.x(), origin.y()));
 
 	        // Collect (session*, instance_offset) for every instance on the plate.
-	        std::vector<DrawPathGCodeGenerator::BatchItem> batch;
-	        for (const ModelObject* obj : plate_objects) {
-	            if (!obj->draw_session) continue;
-	            for (const ModelInstance* inst : obj->instances) {
-	                const Vec3d off = inst->get_offset();
-	                batch.emplace_back(obj->draw_session.get(), Vec2d(off.x(), off.y()));
-	            }
-	        }
+	        std::vector<DrawPathGCodeGenerator::BatchItem> batch = DrawPathGCodeGenerator::collect_batch(plate_objects);
+	        if (batch.empty())
+	            throw Slic3r::RuntimeError("Draw Mode simulation requested, but no drawable draw-path instances were available for G-code generation.");
 
 	        const std::string gcode = gen.generate_batch(batch);
+
+	        if (!m_current_plate)
+	            throw Slic3r::RuntimeError("Draw Mode simulation requested, but no current plate is available for G-code generation.");
 
 	        m_temp_output_path = m_current_plate->get_tmp_gcode_path();
 	        if (FILE* f = boost::nowide::fopen(m_temp_output_path.c_str(), "wb")) {
 	            std::fwrite(gcode.data(), 1, gcode.size(), f);
 	            std::fclose(f);
 	        }
+	        else
+	            throw Slic3r::RuntimeError("Failed to write draw-path G-code for preview.");
 
 	        m_fff_print->set_status(80, _utf8(L("Draw-path G-code complete")));
 	        wxCommandEvent evt(m_event_slicing_completed_id);
@@ -248,6 +261,9 @@ void BackgroundSlicingProcess::process_fff()
 	        wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt.Clone());
 	        return; // done — skip all normal slicing logic below
 	    }
+
+	    if (draw_path_requested)
+	        throw Slic3r::RuntimeError("Draw Mode simulation requested, but the current plate is not a pure draw-path plate.");
 	}
 
 	//BBS: add the logic to process from an existed gcode file

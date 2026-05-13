@@ -1277,9 +1277,10 @@ void DrawModePanel::on_simulate(wxCommandEvent&)
     // Write session to model without resetting the panel  -  user can keep editing.
     if (!apply_session_to_model(/*reset_after=*/false)) return;
 
-    // Trigger the slicing pipeline  -  BackgroundSlicingProcess will detect
-    // the all-draw-path plate and call DrawPathGCodeGenerator directly.
-    m_plater->reslice();
+    // Trigger the draw-path G-code path explicitly. This prevents the
+    // background process from reusing a stale finished normal slice and from
+    // falling through to normal slicing/Arachne.
+    m_plater->reslice_draw_path_simulation();
 
     // Switch to Preview tab so the G-code viewer shows the result.
     wxGetApp().mainframe->select_tab((size_t)MainFrame::tpPreview);

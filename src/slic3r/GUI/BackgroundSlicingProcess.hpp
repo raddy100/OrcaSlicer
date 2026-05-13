@@ -4,6 +4,7 @@
 #include <string>
 #include <condition_variable>
 #include <mutex>
+#include <atomic>
 
 #include <boost/thread.hpp>
 
@@ -95,6 +96,8 @@ public:
 	void set_current_plate(GUI::PartPlate* plate) { m_current_plate = plate; }
 	GUI::PartPlate* get_current_plate() { return m_current_plate; }
 	GCodeProcessorResult* get_current_gcode_result() { return m_gcode_result;}
+	void request_draw_path_gcode() { m_draw_path_gcode_requested.store(true, std::memory_order_release); }
+	bool consume_draw_path_gcode_request() { return m_draw_path_gcode_requested.exchange(false, std::memory_order_acq_rel); }
 
 	// The following wxCommandEvent will be sent to the UI thread / Plater window, when the slicing is finished
 	// and the background processing will transition into G-code export.
@@ -277,6 +280,7 @@ private:
 	GUI::PartPlate* m_current_plate;
 	PrinterTechnology m_printer_tech = ptUnknown;
 	bool m_internal_cancelled = false;
+	std::atomic_bool m_draw_path_gcode_requested { false };
 
     PrintState<BackgroundSlicingProcessStep, bspsCount>   	m_step_state;
 	bool                set_step_started(BackgroundSlicingProcessStep step);

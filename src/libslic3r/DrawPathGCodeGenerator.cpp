@@ -1,5 +1,7 @@
 #include "DrawPathGCodeGenerator.hpp"
 
+#include "Model.hpp"
+
 #include <cmath>
 #include <algorithm>
 
@@ -86,6 +88,35 @@ std::string DrawPathGCodeGenerator::generate_batch(const std::vector<BatchItem>&
 
     gcode += generate_postamble();
     return gcode;
+}
+
+bool DrawPathGCodeGenerator::is_draw_path_object(const ModelObject* object)
+{
+    return object != nullptr && object->is_draw_path_object();
+}
+
+bool DrawPathGCodeGenerator::contains_only_draw_path_objects(const std::vector<ModelObject*>& objects)
+{
+    return !objects.empty() &&
+        std::all_of(objects.begin(), objects.end(), &DrawPathGCodeGenerator::is_draw_path_object);
+}
+
+std::vector<DrawPathGCodeGenerator::BatchItem>
+DrawPathGCodeGenerator::collect_batch(const std::vector<ModelObject*>& objects)
+{
+    std::vector<BatchItem> batch;
+    for (const ModelObject* object : objects) {
+        if (!is_draw_path_object(object) || !object->draw_session)
+            continue;
+
+        for (const ModelInstance* instance : object->instances) {
+            if (!instance)
+                continue;
+            const Vec3d offset = instance->get_offset();
+            batch.emplace_back(object->draw_session.get(), Vec2d(offset.x(), offset.y()));
+        }
+    }
+    return batch;
 }
 
 // ---------------------------------------------------------------------------

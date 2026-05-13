@@ -1,9 +1,13 @@
 #include <catch2/catch_all.hpp>
 #include "libslic3r/DrawPathGCodeGenerator.hpp"
 #include "libslic3r/DrawSession.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
+#include <memory>
 #include <optional>
+#include <utility>
 
 using namespace Slic3r;
 
@@ -361,6 +365,37 @@ TEST_CASE("DrawPathGCodeGenerator: plate_origin shifts all XY coordinates", "[Dr
 
     // The G1 extrusion line should contain X110 (10 + 100 offset).
     REQUIRE(gcode.find("X110") != std::string::npos);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: draw-path plate helpers require all objects to be draw-path objects",
+    "[DrawPathGCodeGenerator]")
+{
+    Model model;
+
+    ModelObject* draw_object = model.add_object("DrawPathObject", "", make_cube(1.0, 1.0, 1.0));
+    ModelInstance* draw_instance = draw_object->add_instance();
+    draw_instance->set_offset(Vec3d(11.0, 22.0, 0.0));
+    draw_object->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+
+    auto draw_session = std::make_unique<DrawSession>();
+    draw_session->add_layer(0.2);
+    draw_session->layers.front().segments.push_back({ Vec2d(0.0, 0.0), Vec2d(5.0, 0.0), false });
+    draw_object->draw_session = std::move(draw_session);
+
+    ModelObjectPtrs objects { draw_object };
+    REQUIRE(DrawPathGCodeGenerator::contains_only_draw_path_objects(objects));
+
+    std::vector<DrawPathGCodeGenerator::BatchItem> batch = DrawPathGCodeGenerator::collect_batch(objects);
+    REQUIRE(batch.size() == 1);
+    REQUIRE(batch.front().first == draw_object->draw_session.get());
+    REQUIRE_THAT(batch.front().second.x(), Catch::Matchers::WithinAbs(11.0, 1e-9));
+    REQUIRE_THAT(batch.front().second.y(), Catch::Matchers::WithinAbs(22.0, 1e-9));
+
+    ModelObject* normal_object = model.add_object("NormalObject", "", make_cube(1.0, 1.0, 1.0));
+    normal_object->add_instance();
+    objects.push_back(normal_object);
+
+    REQUIRE_FALSE(DrawPathGCodeGenerator::contains_only_draw_path_objects(objects));
 }
 
 // ---------------------------------------------------------------------------

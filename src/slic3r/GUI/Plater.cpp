@@ -15897,6 +15897,15 @@ void Plater::reslice()
     record_slice_preset("slicing");
 }
 
+void Plater::reslice_draw_path_simulation()
+{
+    // Draw Mode simulation must generate preview G-code from DrawSession data,
+    // never from a stale finished normal slice and never through Arachne.
+    p->partplate_list.update_slice_context_to_current_plate(p->background_process);
+    p->background_process.request_draw_path_gcode();
+    reslice();
+}
+
 void Plater::record_slice_preset(std::string action)
 {
     // record slice preset
