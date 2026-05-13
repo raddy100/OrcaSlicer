@@ -76,6 +76,27 @@ static DrawSession make_test_session()
     return session;
 }
 
+static DrawSession make_centered_box_session()
+{
+    DrawSession session;
+    session.add_layer(0.2);
+    DrawLayer& layer = session.layers.back();
+    layer.segments.push_back({ Vec2d(-7.5, -7.5), Vec2d( 7.5, -7.5), false });
+    layer.segments.push_back({ Vec2d( 7.5, -7.5), Vec2d( 7.5,  7.5), false });
+    layer.segments.push_back({ Vec2d( 7.5,  7.5), Vec2d(-7.5,  7.5), false });
+    layer.segments.push_back({ Vec2d(-7.5,  7.5), Vec2d(-7.5, -7.5), false });
+    return session;
+}
+
+static std::optional<double> extract_axis_value(const std::string& line, char axis)
+{
+    const std::string token = std::string(" ") + axis;
+    auto ap = line.find(token);
+    if (ap == std::string::npos)
+        return std::nullopt;
+    return std::stod(line.substr(ap + 2));
+}
+
 // ---------------------------------------------------------------------------
 // TASK-005: calc_extrusion math
 // ---------------------------------------------------------------------------
@@ -299,13 +320,7 @@ TEST_CASE("DrawPathGCodeGenerator: centered 15x15mm box with half-width offset s
     DynamicPrintConfig cfg = make_test_config();
     cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
 
-    DrawSession session;
-    session.add_layer(0.2);
-    DrawLayer& layer = session.layers.back();
-    layer.segments.push_back({ Vec2d(-7.5, -7.5), Vec2d( 7.5, -7.5), false });
-    layer.segments.push_back({ Vec2d( 7.5, -7.5), Vec2d( 7.5,  7.5), false });
-    layer.segments.push_back({ Vec2d( 7.5,  7.5), Vec2d(-7.5,  7.5), false });
-    layer.segments.push_back({ Vec2d(-7.5,  7.5), Vec2d(-7.5, -7.5), false });
+    DrawSession session = make_centered_box_session();
 
     // Plate at world origin; instance offset = half of the 20mm work area.
     const Vec2d plate_origin(0.0, 0.0);
@@ -325,15 +340,8 @@ TEST_CASE("DrawPathGCodeGenerator: centered 15x15mm box with half-width offset s
         if (line_end == std::string::npos) line_end = gcode.size();
         const std::string line = gcode.substr(pos, line_end - pos);
 
-        auto extract = [&](char axis) -> std::optional<double> {
-            const std::string token = std::string(" ") + axis;
-            auto ap = line.find(token);
-            if (ap == std::string::npos) return std::nullopt;
-            return std::stod(line.substr(ap + 2));
-        };
-
-        auto xv = extract('X');
-        auto yv = extract('Y');
+        auto xv = extract_axis_value(line, 'X');
+        auto yv = extract_axis_value(line, 'Y');
 
         if (xv) {
             found_xy = true;
@@ -350,6 +358,84 @@ TEST_CASE("DrawPathGCodeGenerator: centered 15x15mm box with half-width offset s
     }
     // At least some XY moves must have been emitted.
     REQUIRE(found_xy);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: draw mode suppresses unsafe machine templates",
+    "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+    cfg.set_key_value("machine_start_gcode", new ConfigOptionString(
+        "G28\n"
+        "G1 X202 Y-3 F12000 ; purge outside draw area\n"
+        "{if max_layer_z > 50}\n"
+        "G1 X202 Y250\n"
+        "{endif}"));
+    cfg.set_key_value("machine_end_gcode", new ConfigOptionString(
+        "G1 X202 Y250 F12000 ; cleanup\n"
+        "G1 Y264.5 F3000\n"
+        "{if max_layer_z > 50}M400{endif}"));
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_centered_box_session(), Vec2d(10.0, 10.0));
+
+    REQUIRE(gcode.find("; draw mode: custom printer start template suppressed") != std::string::npos);
+    REQUIRE(gcode.find("; draw mode: custom printer end template suppressed") != std::string::npos);
+
+    // The draw generator must not pass unsliced printer templates through to the
+    // preview/completion path.  Bambu profiles commonly use these cleanup/purge
+    // coordinates and placeholder conditionals in start/end G-code.
+    REQUIRE(gcode.find("X202") == std::string::npos);
+    REQUIRE(gcode.find("Y250") == std::string::npos);
+    REQUIRE(gcode.find("Y264.5") == std::string::npos);
+    REQUIRE(gcode.find("{if") == std::string::npos);
+    REQUIRE(gcode.find("max_layer_z") == std::string::npos);
+
+    bool found_xy = false;
+    std::size_t pos = 0;
+    while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
+        std::size_t line_end = gcode.find('\n', pos);
+        if (line_end == std::string::npos) line_end = gcode.size();
+        const std::string line = gcode.substr(pos, line_end - pos);
+
+        const auto xv = extract_axis_value(line, 'X');
+        const auto yv = extract_axis_value(line, 'Y');
+        if (xv) {
+            found_xy = true;
+            REQUIRE(*xv >= 2.0);
+            REQUIRE(*xv <= 18.0);
+        }
+        if (yv) {
+            found_xy = true;
+            REQUIRE(*yv >= 2.0);
+            REQUIRE(*yv <= 18.0);
+        }
+
+        pos = line_end + 1;
+    }
+    REQUIRE(found_xy);
+
+    GCodeProcessor processor;
+    PrintConfig processor_config;
+    processor.apply_config(processor_config);
+    processor.initialize("draw-path-template-suppression.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+    processor.finalize(false);
+
+    const GCodeProcessorResult& result = processor.get_result();
+    bool found_extrusion_move = false;
+    for (const GCodeProcessorResult::MoveVertex& move : result.moves) {
+        if (move.delta_extruder <= 0.0f)
+            continue;
+
+        found_extrusion_move = true;
+        REQUIRE(move.position.x() >= 2.0f);
+        REQUIRE(move.position.x() <= 18.0f);
+        REQUIRE(move.position.y() >= 2.0f);
+        REQUIRE(move.position.y() <= 18.0f);
+    }
+    REQUIRE(found_extrusion_move);
 }
 
 TEST_CASE("DrawPathGCodeGenerator: plate_origin shifts all XY coordinates", "[DrawPathGCodeGenerator]")

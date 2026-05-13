@@ -143,10 +143,13 @@ std::string DrawPathGCodeGenerator::generate_preamble(const DrawSession& session
     if (bed_temp > 0)
         out += m_writer.set_bed_temperature(bed_temp, /*wait=*/true);
 
-    // Machine start G-code (homing, etc.).
-    const ConfigOptionString* start_gcode = m_config.option<ConfigOptionString>("machine_start_gcode");
-    if (start_gcode && !start_gcode->value.empty())
-        out += start_gcode->value + "\n";
+    // Draw mode emits direct, plate-relative toolpaths for preview/simulation
+    // without entering the normal slicing pipeline.  Do not append the printer
+    // start template here: vendor profiles may contain purge/cleanup moves and
+    // unexpanded placeholder conditionals that are valid for full prints, but
+    // can leave the draw work area and trip preview plate-boundary checks for a
+    // simple drawing.
+    out += "; draw mode: custom printer start template suppressed\n";
 
     // Fan on.
     const double fan_min = cfg_float_vec("fan_min_speed");
@@ -248,10 +251,10 @@ std::string DrawPathGCodeGenerator::generate_postamble()
     // Fan off.
     out += m_writer.set_fan(0u);
 
-    // Machine end G-code.
-    const ConfigOptionString* end_gcode = m_config.option<ConfigOptionString>("machine_end_gcode");
-    if (end_gcode && !end_gcode->value.empty())
-        out += end_gcode->value + "\n";
+    // See generate_preamble(): suppress the printer end template as well, as
+    // Bambu-style cleanup/purge parking moves can be outside a draw-mode work
+    // area's plate bounds and may still contain unsliced placeholders.
+    out += "; draw mode: custom printer end template suppressed\n";
 
     out += m_writer.postamble();
     return out;
