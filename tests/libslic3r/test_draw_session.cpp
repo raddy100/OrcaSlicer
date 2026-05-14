@@ -729,5 +729,6 @@ TEST_CASE("DrawSession: + Layer navigate-or-create pattern - 6 layers scenario",
     const bool layer_empty = s.layers[s.active_layer].segments.empty();
     REQUIRE(at_top);
     REQUIRE(layer_empty);
-    REQUIRE_FALSE(at_top && !layer_empty); // can_add would be false — button disabled
+    const bool can_add = !at_top || !layer_empty;
+    REQUIRE_FALSE(can_add); // button should be disabled when top layer is empty
 }
