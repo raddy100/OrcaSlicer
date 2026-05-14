@@ -1,5 +1,6 @@
 #include "DrawPathGCodeGenerator.hpp"
 
+#include "ExtrusionEntity.hpp"
 #include "GCode/GCodeProcessor.hpp"
 #include "Model.hpp"
 #include "PlaceholderParser.hpp"
@@ -16,6 +17,15 @@
 #endif
 
 namespace Slic3r {
+
+namespace {
+
+std::string gcode_processor_role_tag(ExtrusionRole role)
+{
+    return ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) + ExtrusionEntity::role_to_string(role) + "\n";
+}
+
+} // namespace
 
 DrawPathGCodeGenerator::DrawPathGCodeGenerator(const DynamicPrintConfig& full_config,
                                                const Vec2d&              plate_origin)
@@ -221,6 +231,8 @@ std::string DrawPathGCodeGenerator::generate_preamble(const DrawSession& session
 
     prepare_placeholder_parser(session, 0, 0.0);
 
+    out += gcode_processor_role_tag(erCustom);
+
     // Process file_start_gcode first, matching the normal slicer ordering.
     out += process_config_gcode_string("file_start_gcode", 0);
 
@@ -265,6 +277,8 @@ std::string DrawPathGCodeGenerator::generate_preamble(const DrawSession& session
     if (!session.layers.empty()) {
         out += m_writer.travel_to_z(session.layers.front().z_end, "initial Z");
     }
+
+    out += gcode_processor_role_tag(erExternalPerimeter);
 
     return out;
 }
@@ -351,6 +365,8 @@ std::string DrawPathGCodeGenerator::generate_postamble(const DrawSession& sessio
 
     const double max_z = max_layer_z(session);
     prepare_placeholder_parser(session, static_cast<int>(session.layers.size()), max_z);
+
+    out += gcode_processor_role_tag(erCustom);
 
     // Process profile end templates with the same placeholder context as the
     // normal slicer path.

@@ -125,6 +125,21 @@ static std::size_t count_occurrences(const std::string& text, const std::string&
     return count;
 }
 
+struct ScopedBBLRoleTags {
+    bool previous;
+
+    ScopedBBLRoleTags()
+        : previous(GCodeProcessor::s_IsBBLPrinter)
+    {
+        GCodeProcessor::s_IsBBLPrinter = true;
+    }
+
+    ~ScopedBBLRoleTags()
+    {
+        GCodeProcessor::s_IsBBLPrinter = previous;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // TASK-005: calc_extrusion math
 // ---------------------------------------------------------------------------
@@ -577,6 +592,66 @@ TEST_CASE("DrawPathGCodeGenerator: draw mode suppresses unsafe machine templates
         REQUIRE(move.position.y() <= 18.0f);
     }
     REQUIRE(found_extrusion_move);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: profile purge extrusion is custom and does not fail plate check",
+    "[DrawPathGCodeGenerator]")
+{
+    ScopedBBLRoleTags scoped_bbl_role_tags;
+
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+    cfg.set_key_value("machine_start_gcode", new ConfigOptionString(
+        "G28\n"
+        "G1 X128.5 Y-1.2 F20000 ; move to purge line outside printable area\n"
+        "G92 E0\n"
+        "G1 X140 Y-1.2 E6 F1200 ; purge extrusion outside printable area\n"
+        "G92 E0\n"));
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string      gcode = gen.generate(make_centered_box_session(), Vec2d(10.0, 10.0));
+
+    REQUIRE(gcode.find("; FEATURE: Custom") != std::string::npos);
+    REQUIRE(gcode.find("; FEATURE: Outer wall") != std::string::npos);
+    REQUIRE(gcode.find("Y-1.2 E6") != std::string::npos);
+
+    GCodeProcessor processor;
+    PrintConfig    processor_config;
+    processor.apply_config(processor_config);
+    processor.initialize("draw-path-custom-purge.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+
+    const Pointfs printable_area { Vec2d(0.0, 0.0), Vec2d(250.0, 0.0), Vec2d(250.0, 250.0), Vec2d(0.0, 250.0) };
+    REQUIRE(processor.check_multi_extruder_gcode_valid(
+        1, printable_area, 250.0, Pointfs(), std::vector<Polygons>(), std::vector<double> { 250.0 },
+        std::vector<int> { 1 }, std::vector<std::set<int>>()));
+    processor.finalize(false);
+
+    const GCodeProcessorResult& result = processor.get_result();
+    REQUIRE(result.gcode_check_result.error_code == 0);
+
+    bool found_custom_purge = false;
+    bool found_draw_extrusion = false;
+    for (const GCodeProcessorResult::MoveVertex& move : result.moves) {
+        if (move.delta_extruder <= 0.0f)
+            continue;
+
+        if (move.position.y() < 0.0f) {
+            found_custom_purge = true;
+            REQUIRE(move.extrusion_role == erCustom);
+        } else {
+            found_draw_extrusion = true;
+            REQUIRE(move.extrusion_role != erCustom);
+            REQUIRE(move.position.x() >= 2.0f);
+            REQUIRE(move.position.x() <= 18.0f);
+            REQUIRE(move.position.y() >= 2.0f);
+            REQUIRE(move.position.y() <= 18.0f);
+        }
+    }
+
+    REQUIRE(found_custom_purge);
+    REQUIRE(found_draw_extrusion);
 }
 
 TEST_CASE("DrawPathGCodeGenerator: placeholder expansion in start/end templates",

@@ -236,6 +236,7 @@ void BackgroundSlicingProcess::process_fff()
 
 	        DynamicPrintConfig config = wxGetApp().preset_bundle->full_config();
 	        const Vec3d        origin = m_current_plate ? m_current_plate->get_origin() : Vec3d::Zero();
+	        GCodeProcessor::s_IsBBLPrinter = m_fff_print->is_BBL_printer();
 	        DrawPathGCodeGenerator gen(config, Vec2d(origin.x(), origin.y()));
 
 	        // Collect (session*, instance_offset) for every instance on the plate.
@@ -258,7 +259,6 @@ void BackgroundSlicingProcess::process_fff()
 	        // that DrawPathGCodeGenerator produced, and mark psGCodeExport done so
 	        // Preview::load_print_as_fff() may load m_gcode_result directly.
 	        GCodeProcessor processor;
-	        GCodeProcessor::s_IsBBLPrinter = m_fff_print->is_BBL_printer();
 	        processor.apply_config(m_fff_print->config());
 	        processor.initialize(m_temp_output_path);
 	        processor.initialize_result_moves();
