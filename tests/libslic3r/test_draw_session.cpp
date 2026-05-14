@@ -570,3 +570,129 @@ TEST_CASE("DrawSession::remove_layer - single empty layer leaves no layers", "[D
     REQUIRE(s.active_layer == -1);
     REQUIRE(s.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// DrawSession::insert_layer tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DrawSession::insert_layer - inserts first layer at position 0", "[DrawSession]")
+{
+    DrawSession s;
+    s.insert_layer(0, 0.2);
+
+    REQUIRE(s.layer_count() == 1);
+    REQUIRE(s.active_layer == 0);
+    REQUIRE(s.layers[0].layer_index == 0);
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.2, 1e-9));
+}
+
+TEST_CASE("DrawSession::insert_layer - appends at end when position == layer_count", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2); // layer 0: z 0.0-0.2
+    s.add_layer(0.2); // layer 1: z 0.2-0.4
+
+    s.insert_layer(2, 0.3); // append
+
+    REQUIRE(s.layer_count() == 3);
+    REQUIRE(s.active_layer == 2);
+    REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.4, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end,   WithinAbs(0.7, 1e-9));
+    REQUIRE(s.layers[0].layer_index == 0);
+    REQUIRE(s.layers[1].layer_index == 1);
+    REQUIRE(s.layers[2].layer_index == 2);
+}
+
+TEST_CASE("DrawSession::insert_layer - inserts in middle and shifts z of layers above", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2); // layer 0: z 0.0-0.2
+    s.add_layer(0.2); // layer 1: z 0.2-0.4
+    s.add_layer(0.2); // layer 2: z 0.4-0.6
+
+    // Insert after layer 0 (position 1)
+    s.insert_layer(1, 0.3);
+
+    REQUIRE(s.layer_count() == 4);
+    REQUIRE(s.active_layer == 1); // new layer is active
+
+    // Original layer 0 is unchanged
+    REQUIRE(s.layers[0].layer_index == 0);
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.2, 1e-9));
+
+    // New layer at index 1
+    REQUIRE(s.layers[1].layer_index == 1);
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.2, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.5, 1e-9));
+
+    // Old layer 1 is now at index 2, shifted by 0.3
+    REQUIRE(s.layers[2].layer_index == 2);
+    REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.5, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end,   WithinAbs(0.7, 1e-9));
+
+    // Old layer 2 is now at index 3, shifted by 0.3
+    REQUIRE(s.layers[3].layer_index == 3);
+    REQUIRE_THAT(s.layers[3].z_start, WithinAbs(0.7, 1e-9));
+    REQUIRE_THAT(s.layers[3].z_end,   WithinAbs(0.9, 1e-9));
+
+    REQUIRE_THAT(s.total_height(), WithinAbs(0.9, 1e-9));
+}
+
+TEST_CASE("DrawSession::insert_layer - segments in existing layers are preserved", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2); // layer 0
+    s.add_layer(0.2); // layer 1
+    s.layers[0].segments.push_back(make_seg(0, 0, 5, 0));
+    s.layers[1].segments.push_back(make_seg(5, 0, 10, 0));
+
+    s.insert_layer(1, 0.2);
+
+    REQUIRE(s.layer_count() == 3);
+    REQUIRE(s.layers[0].segments.size() == 1);  // unchanged
+    REQUIRE(s.layers[1].segments.empty());       // new empty layer
+    REQUIRE(s.layers[2].segments.size() == 1);  // old layer 1
+    REQUIRE_THAT(s.layers[2].segments[0].end.x(), WithinAbs(10.0, 1e-9));
+}
+
+TEST_CASE("DrawSession::insert_layer - throws on out-of-range position", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2);
+
+    REQUIRE_THROWS_AS(s.insert_layer(-1, 0.2), std::out_of_range);
+    REQUIRE_THROWS_AS(s.insert_layer(2,  0.2), std::out_of_range);
+}
+
+TEST_CASE("DrawSession::insert_layer - throws on non-positive layer_height", "[DrawSession]")
+{
+    DrawSession s;
+    REQUIRE_THROWS_AS(s.insert_layer(0, 0.0),  std::invalid_argument);
+    REQUIRE_THROWS_AS(s.insert_layer(0, -0.1), std::invalid_argument);
+}
+
+TEST_CASE("DrawSession::insert_layer - reproduces bug: + Layer from middle skips no layers", "[DrawSession]")
+{
+    // Scenario: 6 layers, user presses - Layer twice (from layer 5 to layer 3),
+    // then presses + Layer. New layer should appear at index 4 (layer 5 in 1-based),
+    // not jump to index 6.
+    DrawSession s;
+    for (int i = 0; i < 6; ++i)
+        s.add_layer(0.2);
+    // add_layer always ends on last layer; simulate navigating down 2
+    s.active_layer = 3; // on layer 4 (0-based index 3)
+
+    // Simulate + Layer: insert after active (position 4)
+    const int insert_pos = s.active_layer + 1; // 4
+    s.insert_layer(insert_pos, 0.2);
+
+    REQUIRE(s.layer_count() == 7);
+    REQUIRE(s.active_layer == 4); // one above where we were, not at the end
+    REQUIRE(s.layers[4].segments.empty()); // new layer
+    // Old layer 4 (index 4) is now at index 5
+    REQUIRE(s.layers[5].layer_index == 5);
+    // Old layer 5 (index 5) is now at index 6
+    REQUIRE(s.layers[6].layer_index == 6);
+}

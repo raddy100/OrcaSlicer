@@ -115,6 +115,34 @@ void AddLayerCommand::undo(DrawSession& session)
 }
 
 // ---------------------------------------------------------------------------
+// InsertLayerAfterActiveCommand
+// ---------------------------------------------------------------------------
+
+void InsertLayerAfterActiveCommand::execute(DrawSession& session)
+{
+    saved_active    = session.active_layer;
+    insert_position = saved_active + 1; // one above the current active layer
+    session.insert_layer(insert_position, layer_height);
+}
+
+void InsertLayerAfterActiveCommand::undo(DrawSession& session)
+{
+    assert(insert_position >= 0 && insert_position < session.layer_count());
+    const double lh = session.layers[insert_position].layer_height();
+
+    session.layers.erase(session.layers.begin() + insert_position);
+
+    // Undo z-shift and layer_index increment for all layers that were shifted up.
+    for (int i = insert_position; i < (int)session.layers.size(); ++i) {
+        session.layers[i].z_start     -= lh;
+        session.layers[i].z_end       -= lh;
+        session.layers[i].layer_index  = i;
+    }
+
+    session.active_layer = saved_active;
+}
+
+// ---------------------------------------------------------------------------
 // ClearLayerCommand
 // ---------------------------------------------------------------------------
 

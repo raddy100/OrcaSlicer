@@ -339,6 +339,12 @@ void DrawModePanel::update_layer_label()
     if (m_next_layer_btn)    m_next_layer_btn->Enable(has_layers && active < count - 1);
     if (m_remove_layer_btn)  m_remove_layer_btn->Enable(can_remove);
     if (m_delete_layer_btn)  m_delete_layer_btn->Enable(has_layers);
+    // "+ Layer" is disabled when the current layer is empty: there is no point
+    // in stacking another layer on top of one with no drawn segments.
+    // When there are no layers yet the button stays enabled so the first layer
+    // can be created.
+    const bool can_add = !has_layers || (active_valid && !layer_empty);
+    if (m_add_layer_btn)     m_add_layer_btn->Enable(can_add);
 }
 
 void DrawModePanel::dispatch_command(std::unique_ptr<DrawCommand> cmd)
@@ -1157,7 +1163,7 @@ void DrawModePanel::on_add_layer(wxCommandEvent&)
         lh = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
         if (lh <= 0.0) lh = 0.2;
     }
-    dispatch_command(std::make_unique<AddLayerCommand>(lh));
+    dispatch_command(std::make_unique<InsertLayerAfterActiveCommand>(lh));
 }
 
 void DrawModePanel::on_remove_layer(wxCommandEvent&)

@@ -39,6 +39,30 @@ void DrawSession::clear()
     active_layer = -1;
 }
 
+void DrawSession::insert_layer(int position, double layer_height)
+{
+    if (layer_height <= 0.0)
+        throw std::invalid_argument("DrawSession::insert_layer: layer_height must be positive");
+    if (position < 0 || position > (int)layers.size())
+        throw std::out_of_range("DrawSession::insert_layer: position out of range");
+
+    const double z_start = (position > 0) ? layers[position - 1].z_end : 0.0;
+
+    // Shift z and layer_index for all layers at and above the insertion point.
+    for (int i = position; i < (int)layers.size(); ++i) {
+        layers[i].z_start     += layer_height;
+        layers[i].z_end       += layer_height;
+        layers[i].layer_index  = i + 1;
+    }
+
+    DrawLayer new_layer;
+    new_layer.layer_index = position;
+    new_layer.z_start     = z_start;
+    new_layer.z_end       = z_start + layer_height;
+    layers.insert(layers.begin() + position, std::move(new_layer));
+    active_layer = position;
+}
+
 bool DrawSession::remove_layer(int index)
 {
     if (index < 0 || index >= (int)layers.size())

@@ -81,6 +81,21 @@ struct AddLayerCommand : DrawCommand {
     void undo(DrawSession& session) override;
 };
 
+// Insert a new empty layer immediately after the current active layer,
+// making it the new active layer. Used by the "+ Layer" button.
+// Layers above the insertion point have their z and layer_index shifted up.
+struct InsertLayerAfterActiveCommand : DrawCommand {
+    double layer_height;
+    int    insert_position; // populated during execute() for undo
+    int    saved_active;    // active_layer before execute(), restored on undo
+
+    explicit InsertLayerAfterActiveCommand(double lh)
+        : layer_height(lh), insert_position(-1), saved_active(-1) {}
+
+    void execute(DrawSession& session) override;
+    void undo(DrawSession& session) override;
+};
+
 // Clear all segments from a layer (preserves the layer itself).
 struct ClearLayerCommand : DrawCommand {
     int                      layer_index;
