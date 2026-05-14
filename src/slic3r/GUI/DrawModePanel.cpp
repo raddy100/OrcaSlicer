@@ -339,11 +339,15 @@ void DrawModePanel::update_layer_label()
     if (m_next_layer_btn)    m_next_layer_btn->Enable(has_layers && active < count - 1);
     if (m_remove_layer_btn)  m_remove_layer_btn->Enable(can_remove);
     if (m_delete_layer_btn)  m_delete_layer_btn->Enable(has_layers);
-    // "+ Layer" is disabled when the current layer is empty: there is no point
-    // in stacking another layer on top of one with no drawn segments.
-    // When there are no layers yet the button stays enabled so the first layer
-    // can be created.
-    const bool can_add = !has_layers || (active_valid && !layer_empty);
+    // "+ Layer" navigates to the next existing layer when one is above, or
+    // creates a new layer when already at the top. The button is disabled only
+    // when the user is at the top AND the current layer is empty (no point
+    // creating another empty layer on top of an empty one).
+    // When not at the top, the button always navigates up — even from an empty
+    // layer — so the user can reach higher layers they navigated away from.
+    // When there are no layers yet the button stays enabled (creates the first).
+    const bool at_top  = !has_layers || (active_valid && active == count - 1);
+    const bool can_add = !at_top || !layer_empty;
     if (m_add_layer_btn)     m_add_layer_btn->Enable(can_add);
 }
 
@@ -1157,13 +1161,26 @@ void DrawModePanel::on_next_layer(wxCommandEvent&)
 
 void DrawModePanel::on_add_layer(wxCommandEvent&)
 {
-    // Default layer height  -  read from active print preset
+    const int count  = m_session.layer_count();
+    const int active = m_session.active_layer;
+
+    // If there are already layers above the current one, navigate up by one
+    // without creating anything new.  This lets the user use + Layer to
+    // travel back up through layers they navigated away from with - Layer.
+    if (count > 0 && active < count - 1) {
+        m_session.active_layer++;
+        reset_draft(false);
+        refresh();
+        return;
+    }
+
+    // At the top (or no layers at all): create a new layer above the current one.
     double lh = 0.2;
     if (wxGetApp().preset_bundle) {
         lh = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
         if (lh <= 0.0) lh = 0.2;
     }
-    dispatch_command(std::make_unique<InsertLayerAfterActiveCommand>(lh));
+    dispatch_command(std::make_unique<AddLayerCommand>(lh));
 }
 
 void DrawModePanel::on_remove_layer(wxCommandEvent&)

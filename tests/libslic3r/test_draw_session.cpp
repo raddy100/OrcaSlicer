@@ -673,26 +673,61 @@ TEST_CASE("DrawSession::insert_layer - throws on non-positive layer_height", "[D
     REQUIRE_THROWS_AS(s.insert_layer(0, -0.1), std::invalid_argument);
 }
 
-TEST_CASE("DrawSession::insert_layer - reproduces bug: + Layer from middle skips no layers", "[DrawSession]")
+TEST_CASE("DrawSession::insert_layer - inserts mid-stack and shifts indices correctly", "[DrawSession]")
 {
-    // Scenario: 6 layers, user presses - Layer twice (from layer 5 to layer 3),
-    // then presses + Layer. New layer should appear at index 4 (layer 5 in 1-based),
-    // not jump to index 6.
+    // Verify insert_layer at a non-end position correctly numbers all layers.
     DrawSession s;
     for (int i = 0; i < 6; ++i)
         s.add_layer(0.2);
-    // add_layer always ends on last layer; simulate navigating down 2
-    s.active_layer = 3; // on layer 4 (0-based index 3)
 
-    // Simulate + Layer: insert after active (position 4)
-    const int insert_pos = s.active_layer + 1; // 4
-    s.insert_layer(insert_pos, 0.2);
+    s.insert_layer(3, 0.2); // insert at index 3 (between old layer 2 and 3)
 
     REQUIRE(s.layer_count() == 7);
-    REQUIRE(s.active_layer == 4); // one above where we were, not at the end
-    REQUIRE(s.layers[4].segments.empty()); // new layer
-    // Old layer 4 (index 4) is now at index 5
-    REQUIRE(s.layers[5].layer_index == 5);
-    // Old layer 5 (index 5) is now at index 6
-    REQUIRE(s.layers[6].layer_index == 6);
+    REQUIRE(s.active_layer == 3);
+    for (int i = 0; i < 7; ++i)
+        REQUIRE(s.layers[i].layer_index == i);
+}
+
+TEST_CASE("DrawSession: + Layer navigate-or-create pattern - 6 layers scenario", "[DrawSession]")
+{
+    // Full scenario from the bug report:
+    //   6 layers with content, navigate down 4 times to layer 2 (index 1),
+    //   then navigate up 4 times with + Layer back to layer 6 (index 5),
+    //   then + Layer once more creates layer 7 (a new empty layer at the top).
+    DrawSession s;
+    for (int i = 0; i < 6; ++i) {
+        s.add_layer(0.2);
+        s.layers[i].segments.push_back(make_seg(0, 0, 5, 0)); // give every layer content
+    }
+    REQUIRE(s.active_layer == 5); // on layer 6 (index 5)
+
+    // Navigate down 4 times (simulate - Layer x4)
+    for (int step = 0; step < 4; ++step)
+        s.active_layer--;
+    REQUIRE(s.active_layer == 1); // on layer 2 (index 1)
+
+    // Navigate up 4 times with + Layer (should NOT create new layers — navigate existing ones)
+    for (int step = 0; step < 4; ++step) {
+        REQUIRE(s.active_layer < s.layer_count() - 1); // not at top yet
+        s.active_layer++;                               // simulate the navigate branch
+    }
+    REQUIRE(s.active_layer == 5);  // back at layer 6 (index 5)
+    REQUIRE(s.layer_count() == 6); // still only 6 layers — no new ones created
+
+    // Now at top with content: + Layer should create layer 7
+    REQUIRE(s.active_layer == s.layer_count() - 1); // confirm at top
+    REQUIRE_FALSE(s.layers[s.active_layer].segments.empty()); // has content
+    s.add_layer(0.2);
+
+    REQUIRE(s.layer_count() == 7);
+    REQUIRE(s.active_layer == 6); // new layer 7 (index 6)
+    REQUIRE(s.layers[6].segments.empty()); // new layer is empty
+
+    // + Layer should now be DISABLED (at top, layer is empty).
+    // Verify the disable condition: at_top && layer_empty
+    const bool at_top    = s.active_layer == s.layer_count() - 1;
+    const bool layer_empty = s.layers[s.active_layer].segments.empty();
+    REQUIRE(at_top);
+    REQUIRE(layer_empty);
+    REQUIRE_FALSE(at_top && !layer_empty); // can_add would be false — button disabled
 }
