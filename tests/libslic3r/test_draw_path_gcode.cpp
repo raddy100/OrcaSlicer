@@ -8,6 +8,7 @@
 #include "libslic3r/Utils.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <cstdlib>
@@ -1017,4 +1018,217 @@ TEST_CASE("DrawPathGCodeGenerator: multi-layer smoke test", "[DrawPathGCodeGener
             pos = (line_end != std::string::npos) ? line_end + 1 : std::string::npos;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// TASK-007: Arc and Bezier G-code generation tests
+// ---------------------------------------------------------------------------
+
+// Helper: count lines in gcode that START with a given prefix.
+static std::size_t count_lines_starting_with(const std::string& gcode, const std::string& prefix)
+{
+    std::size_t count = 0;
+    std::size_t pos   = 0;
+    while (pos < gcode.size()) {
+        std::size_t line_end = gcode.find('\n', pos);
+        if (line_end == std::string::npos) line_end = gcode.size();
+        const std::string line = gcode.substr(pos, line_end - pos);
+        if (line.rfind(prefix, 0) == 0)
+            ++count;
+        pos = line_end + 1;
+    }
+    return count;
+}
+
+// Build a config with draw_path_arc_output set to the given value.
+static DynamicPrintConfig make_arc_config(bool native_arc)
+{
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("retraction_length",     new ConfigOptionFloats({ 0.0 }));
+    cfg.set_key_value("draw_path_arc_output",  new ConfigOptionBool(native_arc));
+    return cfg;
+}
+
+// A quarter-circle CCW arc session: from (10,0) through (7.071,7.071) to (0,10).
+static DrawSession make_ccw_arc_session()
+{
+    constexpr double R    = 10.0;
+    const double    cos45 = std::cos(M_PI / 4.0);
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R)));
+    return session;
+}
+
+// The same arc but traversed CW: from (0,10) through (7.071,7.071) to (10,0).
+static DrawSession make_cw_arc_session()
+{
+    constexpr double R    = 10.0;
+    const double    cos45 = std::cos(M_PI / 4.0);
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(0.0, R), Vec2d(R * cos45, R * cos45), Vec2d(R, 0.0)));
+    return session;
+}
+
+// A cubic bezier session: gentle S-curve.
+static DrawSession make_bezier_session()
+{
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(
+        DrawSegment::make_bezier(Vec2d(0.0, 0.0), Vec2d(3.0, 6.0), Vec2d(7.0, 6.0), Vec2d(10.0, 0.0)));
+    return session;
+}
+
+TEST_CASE("DrawPathGCodeGenerator: arc in compat mode emits only G1, no G2/G3", "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/false);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_ccw_arc_session());
+
+    REQUIRE(count_lines_starting_with(gcode, "G2 ") == 0);
+    REQUIRE(count_lines_starting_with(gcode, "G3 ") == 0);
+    // Should still produce extrusion G1 lines.
+    REQUIRE(count_lines_starting_with(gcode, "G1 ") > 0);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: bezier in compat mode emits only G1, no G2/G3", "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/false);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_bezier_session());
+
+    REQUIRE(count_lines_starting_with(gcode, "G2 ") == 0);
+    REQUIRE(count_lines_starting_with(gcode, "G3 ") == 0);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: compat mode arc extrusion total matches arc length within 5%",
+    "[DrawPathGCodeGenerator]")
+{
+    // Quarter-circle R=10 → arc length = π*10/2 ≈ 15.708 mm.
+    constexpr double R            = 10.0;
+    constexpr double arc_length   = M_PI * R / 2.0;
+    constexpr double layer_h      = 0.2;
+    constexpr double nozzle_d     = 0.4;
+    constexpr double filament_d   = 1.75;
+    const double     e_per_mm     = (nozzle_d * layer_h) / (M_PI * (filament_d / 2.0) * (filament_d / 2.0));
+    const double     expected_E   = e_per_mm * arc_length;
+
+    DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/false);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_ccw_arc_session());
+
+    // E is absolute: the total extrusion for the arc is the maximum E seen
+    // across all G1 lines (which is the last cumulative E before retraction).
+    double max_extrusion_E = 0.0;
+    std::size_t pos = 0;
+    while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
+        std::size_t line_end = gcode.find('\n', pos);
+        auto e_pos = gcode.find(" E", pos);
+        if (e_pos != std::string::npos && e_pos < line_end) {
+            const double val = std::stod(gcode.substr(e_pos + 2,
+                gcode.find_first_of(" \n\r", e_pos + 2) - (e_pos + 2)));
+            if (val > max_extrusion_E)
+                max_extrusion_E = val;
+        }
+        pos = (line_end != std::string::npos) ? line_end + 1 : std::string::npos;
+    }
+
+    REQUIRE_THAT(max_extrusion_E, Catch::Matchers::WithinRel(expected_E, 0.05));
+}
+
+TEST_CASE("DrawPathGCodeGenerator: native mode arc emits G2 or G3 command", "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/true);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_ccw_arc_session());
+
+    const std::size_t g2_count = count_lines_starting_with(gcode, "G2 ");
+    const std::size_t g3_count = count_lines_starting_with(gcode, "G3 ");
+    REQUIRE(g2_count + g3_count >= 1);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: CCW arc in native mode emits G3 (not G2)", "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/true);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_ccw_arc_session());
+
+    REQUIRE(count_lines_starting_with(gcode, "G3 ") >= 1);
+    REQUIRE(count_lines_starting_with(gcode, "G2 ") == 0);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: CW arc in native mode emits G2 (not G3)", "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/true);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_cw_arc_session());
+
+    REQUIRE(count_lines_starting_with(gcode, "G2 ") >= 1);
+    REQUIRE(count_lines_starting_with(gcode, "G3 ") == 0);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: bezier in native mode still falls back to G1 linearization",
+    "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/true);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(make_bezier_session());
+
+    // Bezier should always be linearised — no G2/G3.
+    REQUIRE(count_lines_starting_with(gcode, "G2 ") == 0);
+    REQUIRE(count_lines_starting_with(gcode, "G3 ") == 0);
+    // Must still emit extrusion G1 lines.
+    REQUIRE(count_lines_starting_with(gcode, "G1 ") > 0);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: travel arc emits no extrusion (no E on G1/G3/G2 lines)",
+    "[DrawPathGCodeGenerator]")
+{
+    constexpr double R    = 10.0;
+    const double    cos45 = std::cos(M_PI / 4.0);
+    DrawSession session;
+    session.add_layer(0.2);
+    // Travel arc: is_travel = true
+    session.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R), /*is_travel=*/true));
+
+    DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/false);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    // With zero retraction and a travel-only arc, no positive E extrusion should occur.
+    bool has_positive_e = false;
+    std::size_t pos = 0;
+    while ((pos = gcode.find(" E", pos)) != std::string::npos) {
+        const std::size_t val_start = pos + 2;
+        const double val = std::stod(gcode.substr(val_start,
+            gcode.find_first_of(" \n\r", val_start) - val_start));
+        if (val > 1e-9) { has_positive_e = true; break; }
+        pos = val_start;
+    }
+    REQUIRE_FALSE(has_positive_e);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: degenerate arc (collinear) in native mode falls back to G1 without crash",
+    "[DrawPathGCodeGenerator]")
+{
+    // Collinear arc — circumcenter determinant ≈ 0 — should produce a G1 fallback.
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(0.0, 0.0), Vec2d(5.0, 0.0), Vec2d(10.0, 0.0)));
+
+    DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/true);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+
+    REQUIRE_NOTHROW([&]{ gen.generate(session); }());
+
+    const std::string gcode = gen.generate(session);
+    // Degenerate arc → G1 fallback, no G2/G3.
+    REQUIRE(count_lines_starting_with(gcode, "G2 ") == 0);
+    REQUIRE(count_lines_starting_with(gcode, "G3 ") == 0);
 }

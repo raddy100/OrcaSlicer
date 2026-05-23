@@ -1,5 +1,6 @@
 #include "DrawPathGCodeGenerator.hpp"
 
+#include "DrawModeFeedback.hpp"
 #include "ExtrusionEntity.hpp"
 #include "GCode/GCodeProcessor.hpp"
 #include "Model.hpp"
@@ -302,8 +303,6 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
         out += m_writer.set_temperature(static_cast<unsigned int>(temp), /*wait=*/false, /*tool=*/0);
 
     // Speed for this layer (convert mm/s → mm/min for G-code F parameter).
-    // PRD-MAP: "first_layer_speed" → initial_layer_speed (mm/s)
-    //          "print_speed"       → outer_wall_speed     (mm/s)
     const double speed_mms = is_first
         ? cfg_float("initial_layer_speed")
         : cfg_float("outer_wall_speed");
@@ -312,14 +311,16 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
         out += m_writer.set_speed(speed_mmmin, "draw layer speed");
 
     // All segments in a layer print at the same Z height (z_end).
-    // There is no Z ramp within a layer — the entire layer is printed at a constant Z.
     const double layer_z = layer.z_end;
+
+    // Read arc output mode once per layer.
+    const bool native_arc_mode = cfg_int("draw_path_arc_output") != 0;
 
     for (const DrawSegment& seg : layer.segments) {
         const Vec2d abs_start = seg.start + abs_offset;
         const Vec2d abs_end   = seg.end   + abs_offset;
 
-        // Verify head is at abs_start (X, Y, and Z); if not, emit a positioning travel first.
+        // Verify head is at abs_start; if not, emit a positioning travel first.
         const Vec3d& cur = m_writer.get_position();
         const bool need_reposition =
             std::abs(cur.x() - abs_start.x()) > 0.001 ||
@@ -327,22 +328,95 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
             std::abs(cur.z() - layer_z)       > 0.001;
 
         if (seg.is_travel) {
-            // For travel segments: retract once, optionally visit abs_start, then go to abs_end.
+            // Travel segment: retract, visit sampled waypoints without extruding, unretract.
             out += m_writer.retract();
             if (need_reposition)
                 out += m_writer.travel_to_xyz(Vec3d(abs_start.x(), abs_start.y(), layer_z), "to travel-src");
-            out += m_writer.travel_to_xyz(Vec3d(abs_end.x(), abs_end.y(), layer_z), "travel");
+
+            if (seg.type == DrawSegmentType::Line) {
+                // Simple travel to end.
+                out += m_writer.travel_to_xyz(Vec3d(abs_end.x(), abs_end.y(), layer_z), "travel");
+            } else {
+                // Sample arc/bezier and travel through each waypoint.
+                const std::vector<Vec2d> pts = draw_sample_segment(seg);
+                for (size_t i = 1; i < pts.size(); ++i) {
+                    const Vec2d abs_pt = pts[i] + abs_offset;
+                    out += m_writer.travel_to_xyz(Vec3d(abs_pt.x(), abs_pt.y(), layer_z), "travel");
+                }
+            }
             out += m_writer.unretract();
+
         } else {
-            // For extrusion segments: position head at abs_start if needed, then extrude to abs_end.
+            // Extrusion segment: position head at abs_start if needed, then extrude.
             if (need_reposition) {
                 out += m_writer.retract();
                 out += m_writer.travel_to_xyz(Vec3d(abs_start.x(), abs_start.y(), layer_z), "to seg start");
                 out += m_writer.unretract();
             }
-            const double dE = calc_extrusion(seg.length());
-            out += m_writer.extrude_to_xyz(
-                Vec3d(abs_end.x(), abs_end.y(), layer_z), dE, "draw extrude");
+
+            if (seg.type == DrawSegmentType::Line) {
+                // Standard G1 extrusion.
+                const double dE = calc_extrusion(seg.length());
+                out += m_writer.extrude_to_xyz(
+                    Vec3d(abs_end.x(), abs_end.y(), layer_z), dE, "draw extrude");
+
+            } else if (seg.type == DrawSegmentType::CircularArc && native_arc_mode) {
+                // Native arc mode: try G2/G3.
+                // Compute circumcenter in segment (plate-relative) coordinates.
+                const Vec2d S = seg.start;
+                const Vec2d P = seg.ctrl1; // through-point
+                const Vec2d E = seg.end;
+
+                // Circumcenter calculation inline (same as sampling helper).
+                const double ax = S.x(), ay = S.y();
+                const double bx = P.x(), by = P.y();
+                const double cx = E.x(), cy = E.y();
+                const double D  = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+
+                if (std::abs(D) < 1e-10) {
+                    // Collinear fallback: single G1.
+                    const double dE = calc_extrusion(seg.length());
+                    out += m_writer.extrude_to_xyz(
+                        Vec3d(abs_end.x(), abs_end.y(), layer_z), dE, "draw arc fallback");
+                } else {
+                    const double sa = ax * ax + ay * ay;
+                    const double sb = bx * bx + by * by;
+                    const double sc = cx * cx + cy * cy;
+                    const Vec2d local_center(
+                        (sa * (by - cy) + sb * (cy - ay) + sc * (ay - by)) / D,
+                        (sa * (cx - bx) + sb * (ax - cx) + sc * (bx - ax)) / D);
+
+                    // center_offset = center_abs - current_abs_start
+                    // Since abs_start = seg.start + abs_offset, and center_abs = local_center + abs_offset,
+                    // center_offset = local_center - seg.start (the abs_offset cancels).
+                    const Vec2d center_offset = local_center - seg.start;
+
+                    // Determine CCW vs CW via cross product of (P-S) × (E-S).
+                    const double cross = (P.x() - S.x()) * (E.y() - S.y())
+                                       - (P.y() - S.y()) * (E.x() - S.x());
+                    const bool is_ccw = (cross > 0.0);
+
+                    // Use sampled length for accurate extrusion volume.
+                    const double arc_length = draw_segment_sampled_length(seg);
+                    const double dE = calc_extrusion(arc_length);
+
+                    out += m_writer.extrude_arc_to_xy(
+                        abs_end, center_offset, dE, is_ccw, "draw arc G2/G3");
+                }
+
+            } else {
+                // Compatibility mode for arcs, or any bezier: G1 linearization.
+                const std::vector<Vec2d> pts = draw_sample_segment(seg);
+                for (size_t i = 1; i < pts.size(); ++i) {
+                    const Vec2d abs_pt  = pts[i]     + abs_offset;
+                    const Vec2d abs_prev = pts[i - 1] + abs_offset;
+                    const double chord = (pts[i] - pts[i - 1]).norm();
+                    const double dE    = calc_extrusion(chord);
+                    out += m_writer.extrude_to_xyz(
+                        Vec3d(abs_pt.x(), abs_pt.y(), layer_z), dE, "draw extrude");
+                    (void)abs_prev; // used implicitly through previous writer position
+                }
+            }
         }
     }
 
@@ -580,6 +654,9 @@ int DrawPathGCodeGenerator::cfg_int(const std::string& key) const
 {
     const ConfigOption* opt = m_config.option(key);
     if (!opt) return 0;
+    // ConfigOptionBool does not support getInt() — handle it explicitly.
+    if (opt->type() == coBool)
+        return opt->getBool() ? 1 : 0;
     return opt->getInt();
 }
 

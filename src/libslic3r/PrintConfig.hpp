@@ -1044,6 +1044,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     // G-code is produced by DrawPathGCodeGenerator instead of the normal pipeline.
     // Default false — normal mesh objects are unaffected.
     ((ConfigOptionBool,  draw_path_object))
+    // When true, circular arc draw path segments emit G2/G3 arc commands.
+    // Bezier curves always fall back to G1 linearization regardless of this flag.
+    // Default false — all segments use G1 for maximum firmware compatibility.
+    ((ConfigOptionBool,  draw_path_arc_output))
 )
 
 // This object is mapped to Perl as Slic3r::Config::PrintRegion.

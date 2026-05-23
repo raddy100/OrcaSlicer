@@ -4033,6 +4033,13 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comDevelop;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def           = this->add("draw_path_arc_output", coBool);
+    def->label    = L("Use native arc G-code for draw paths");
+    def->tooltip  = L("When enabled, circular arc draw path segments emit G2/G3 arc commands. "
+                       "Bezier curves always use G1 linearization.");
+    def->mode     = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("ironing_type", coEnum);
     def->label = L("Ironing Type");
     def->category = L("Quality");
