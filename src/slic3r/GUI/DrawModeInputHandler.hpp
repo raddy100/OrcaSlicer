@@ -29,11 +29,12 @@ constexpr double DRAW_ENDPOINT_SNAP_RADIUS = 1.0;  // snap-to-existing-endpoint 
 
 // Hit-test result for editing mode.
 struct HitResult {
-    enum class Kind { None, Endpoint, SegmentBody };
+    enum class Kind { None, Endpoint, ControlHandle, SegmentBody };
     Kind kind = Kind::None;
     int  layer_index    = -1;
     int  segment_index  = -1;
     bool is_start       = false; // only meaningful when kind == Endpoint
+    int  ctrl_idx       = 0;    // only meaningful when kind == ControlHandle: 0=ctrl1, 1=ctrl2
 };
 
 class DrawModeInputHandler

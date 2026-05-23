@@ -1,6 +1,7 @@
 #include "DrawModeInputHandler.hpp"
 #include "CameraUtils.hpp"
 #include "Camera.hpp"
+#include "libslic3r/DrawModeFeedback.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -99,31 +100,74 @@ HitResult DrawModeInputHandler::hit_test(
         double ds = (pos - seg.start).norm();
         if (ds < best_ep_dist) {
             best_ep_dist = ds;
-            best_ep = {HitResult::Kind::Endpoint, layer_index, si, true};
+            best_ep = {HitResult::Kind::Endpoint, layer_index, si, true, 0};
         }
 
         double de = (pos - seg.end).norm();
         if (de < best_ep_dist) {
             best_ep_dist = de;
-            best_ep = {HitResult::Kind::Endpoint, layer_index, si, false};
+            best_ep = {HitResult::Kind::Endpoint, layer_index, si, false, 0};
         }
     }
 
     if (best_ep.kind == HitResult::Kind::Endpoint)
         return best_ep;
 
-    // Priority 2: segment bodies
+    // Priority 2: control handles (arc through-point, bezier ctrl1/ctrl2)
+    double best_ctrl_dist = m_hit_threshold;
+    HitResult best_ctrl;
+    best_ctrl.kind = HitResult::Kind::None;
+
+    for (int si = 0; si < (int)layer.segments.size(); ++si) {
+        const DrawSegment& seg = layer.segments[si];
+        if (seg.type == DrawSegmentType::CircularArc) {
+            double d = (pos - seg.ctrl1).norm();
+            if (d < best_ctrl_dist) {
+                best_ctrl_dist = d;
+                best_ctrl = {HitResult::Kind::ControlHandle, layer_index, si, false, 0};
+            }
+        } else if (seg.type == DrawSegmentType::CubicBezier) {
+            double d1 = (pos - seg.ctrl1).norm();
+            if (d1 < best_ctrl_dist) {
+                best_ctrl_dist = d1;
+                best_ctrl = {HitResult::Kind::ControlHandle, layer_index, si, false, 0};
+            }
+            double d2 = (pos - seg.ctrl2).norm();
+            if (d2 < best_ctrl_dist) {
+                best_ctrl_dist = d2;
+                best_ctrl = {HitResult::Kind::ControlHandle, layer_index, si, false, 1};
+            }
+        }
+    }
+
+    if (best_ctrl.kind == HitResult::Kind::ControlHandle)
+        return best_ctrl;
+
+    // Priority 3: segment bodies
     double best_body_dist = m_hit_threshold;
     HitResult best_body;
     best_body.kind = HitResult::Kind::None;
 
     for (int si = 0; si < (int)layer.segments.size(); ++si) {
         const DrawSegment& seg = layer.segments[si];
-        double t = 0.0;
-        double d = point_to_segment_distance(pos, seg.start, seg.end, t);
-        if (d < best_body_dist) {
-            best_body_dist = d;
-            best_body = {HitResult::Kind::SegmentBody, layer_index, si, false};
+        if (seg.type == DrawSegmentType::Line) {
+            double t = 0.0;
+            double d = point_to_segment_distance(pos, seg.start, seg.end, t);
+            if (d < best_body_dist) {
+                best_body_dist = d;
+                best_body = {HitResult::Kind::SegmentBody, layer_index, si, false, 0};
+            }
+        } else {
+            // Arc or bezier: check each sub-segment of the sampled polyline
+            auto pts = draw_sample_segment(seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+            for (size_t k = 1; k < pts.size(); ++k) {
+                double t = 0.0;
+                double d = point_to_segment_distance(pos, pts[k-1], pts[k], t);
+                if (d < best_body_dist) {
+                    best_body_dist = d;
+                    best_body = {HitResult::Kind::SegmentBody, layer_index, si, false, 0};
+                }
+            }
         }
     }
 
