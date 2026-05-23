@@ -99,6 +99,15 @@ BoundingBoxf3 DrawSession::bounding_box() const
         for (const DrawSegment& seg : layer.segments) {
             bbox.merge(Vec3d(seg.start.x(), seg.start.y(), layer.z_start));
             bbox.merge(Vec3d(seg.end.x(),   seg.end.y(),   layer.z_end));
+
+            if (seg.type == DrawSegmentType::CircularArc) {
+                // Include the through-point so that arc bulge is enclosed.
+                bbox.merge(Vec3d(seg.ctrl1.x(), seg.ctrl1.y(), layer.z_start));
+            } else if (seg.type == DrawSegmentType::CubicBezier) {
+                // Conservative approximation: include both control points.
+                bbox.merge(Vec3d(seg.ctrl1.x(), seg.ctrl1.y(), layer.z_start));
+                bbox.merge(Vec3d(seg.ctrl2.x(), seg.ctrl2.y(), layer.z_start));
+            }
         }
     }
     return bbox;

@@ -732,3 +732,265 @@ TEST_CASE("DrawSession: + Layer navigate-or-create pattern - 6 layers scenario",
     const bool can_add = !at_top || !layer_empty;
     REQUIRE_FALSE(can_add); // button should be disabled when top layer is empty
 }
+
+// ---------------------------------------------------------------------------
+// TASK-002: DrawSegment type extension tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DrawSegment: make_line produces type Line with correct fields", "[DrawSession]")
+{
+    const Vec2d s(0.0, 0.0), e(5.0, 3.0);
+    const DrawSegment seg = DrawSegment::make_line(s, e);
+    REQUIRE(seg.type      == DrawSegmentType::Line);
+    REQUIRE_THAT(seg.start.x(), WithinAbs(0.0, 1e-12));
+    REQUIRE_THAT(seg.start.y(), WithinAbs(0.0, 1e-12));
+    REQUIRE_THAT(seg.end.x(),   WithinAbs(5.0, 1e-12));
+    REQUIRE_THAT(seg.end.y(),   WithinAbs(3.0, 1e-12));
+    REQUIRE_FALSE(seg.is_travel);
+}
+
+TEST_CASE("DrawSegment: make_line with is_travel = true", "[DrawSession]")
+{
+    const DrawSegment seg = DrawSegment::make_line(Vec2d(1.0, 2.0), Vec2d(3.0, 4.0), /*is_travel=*/true);
+    REQUIRE(seg.type      == DrawSegmentType::Line);
+    REQUIRE(seg.is_travel);
+}
+
+TEST_CASE("DrawSegment: make_arc stores through-point in ctrl1", "[DrawSession]")
+{
+    const Vec2d start(10.0, 0.0), through(7.07, 7.07), end(0.0, 10.0);
+    const DrawSegment seg = DrawSegment::make_arc(start, through, end);
+    REQUIRE(seg.type == DrawSegmentType::CircularArc);
+    REQUIRE_THAT(seg.start.x(),  WithinAbs(10.0, 1e-12));
+    REQUIRE_THAT(seg.start.y(),  WithinAbs(0.0,  1e-12));
+    REQUIRE_THAT(seg.ctrl1.x(), WithinAbs(7.07, 1e-12));
+    REQUIRE_THAT(seg.ctrl1.y(), WithinAbs(7.07, 1e-12));
+    REQUIRE_THAT(seg.end.x(),   WithinAbs(0.0,  1e-12));
+    REQUIRE_THAT(seg.end.y(),   WithinAbs(10.0, 1e-12));
+    REQUIRE_FALSE(seg.is_travel);
+}
+
+TEST_CASE("DrawSegment: make_bezier stores all four points", "[DrawSession]")
+{
+    const Vec2d p0(0.0, 0.0), p1(2.0, 4.0), p2(8.0, 4.0), p3(10.0, 0.0);
+    const DrawSegment seg = DrawSegment::make_bezier(p0, p1, p2, p3);
+    REQUIRE(seg.type == DrawSegmentType::CubicBezier);
+    REQUIRE_THAT(seg.start.x(), WithinAbs(0.0,  1e-12));
+    REQUIRE_THAT(seg.ctrl1.x(), WithinAbs(2.0,  1e-12));
+    REQUIRE_THAT(seg.ctrl1.y(), WithinAbs(4.0,  1e-12));
+    REQUIRE_THAT(seg.ctrl2.x(), WithinAbs(8.0,  1e-12));
+    REQUIRE_THAT(seg.ctrl2.y(), WithinAbs(4.0,  1e-12));
+    REQUIRE_THAT(seg.end.x(),   WithinAbs(10.0, 1e-12));
+    REQUIRE_FALSE(seg.is_travel);
+}
+
+TEST_CASE("DrawSession: is_empty returns false when a non-travel arc is present", "[DrawSession]")
+{
+    DrawSession s;
+    s.add_layer(0.2);
+    s.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(10.0, 0.0), Vec2d(7.07, 7.07), Vec2d(0.0, 10.0)));
+    REQUIRE_FALSE(s.is_empty());
+}
+
+TEST_CASE("DrawSession: bounding_box is defined for arc segment and includes through-point", "[DrawSession]")
+{
+    // Arc from (10,0) through (7.07,7.07) to (0,10) — the through-point is included.
+    DrawSession s;
+    s.add_layer(0.2);
+    s.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(10.0, 0.0), Vec2d(7.07, 7.07), Vec2d(0.0, 10.0)));
+
+    const BoundingBoxf3 bb = s.bounding_box();
+    REQUIRE(bb.defined);
+    // x must span [0, 10], y must span [0, 10], the through-point at (7.07, 7.07) is included.
+    REQUIRE_THAT(bb.min.x(), WithinAbs(0.0,  1e-6));
+    REQUIRE_THAT(bb.max.x(), WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(bb.min.y(), WithinAbs(0.0,  1e-6));
+    REQUIRE_THAT(bb.max.y(), WithinAbs(10.0, 1e-6));
+}
+
+TEST_CASE("DrawSession: bounding_box includes bezier control points", "[DrawSession]")
+{
+    // Bezier start=(0,0) end=(10,0), control points reach y=8 — bbox must cover y=8.
+    DrawSession s;
+    s.add_layer(0.2);
+    s.layers[0].segments.push_back(
+        DrawSegment::make_bezier(Vec2d(0.0, 0.0), Vec2d(3.0, 8.0), Vec2d(7.0, 8.0), Vec2d(10.0, 0.0)));
+
+    const BoundingBoxf3 bb = s.bounding_box();
+    REQUIRE(bb.defined);
+    REQUIRE(bb.max.y() >= 8.0 - 1e-9);
+}
+
+TEST_CASE("DrawSession: copy semantics with mixed segment types", "[DrawSession]")
+{
+    DrawSession original;
+    original.add_layer(0.2);
+    original.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(5, 0)));
+    original.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(5, 0), Vec2d(5, 5), Vec2d(10, 0)));
+    original.layers[0].segments.push_back(
+        DrawSegment::make_bezier(Vec2d(10, 0), Vec2d(12, 4), Vec2d(18, 4), Vec2d(20, 0)));
+
+    DrawSession copy = original; // copy constructor
+
+    // Mutate copy — original must be unchanged.
+    copy.layers[0].segments[0].end = Vec2d(99.0, 99.0);
+    copy.layers[0].segments[1].ctrl1 = Vec2d(0.0, 0.0);
+    copy.layers[0].segments[2].ctrl2 = Vec2d(0.0, 0.0);
+    copy.add_layer(0.3);
+
+    REQUIRE(original.layer_count() == 1);
+    REQUIRE_THAT(original.layers[0].segments[0].end.x(),    WithinAbs(5.0,  1e-9));
+    REQUIRE_THAT(original.layers[0].segments[1].ctrl1.x(), WithinAbs(5.0,  1e-9));
+    REQUIRE_THAT(original.layers[0].segments[1].ctrl1.y(), WithinAbs(5.0,  1e-9));
+    REQUIRE_THAT(original.layers[0].segments[2].ctrl2.x(), WithinAbs(18.0, 1e-9));
+}
+
+TEST_CASE("DrawSegment: degenerate arc (collinear points) does not crash", "[DrawSession]")
+{
+    // All three points at the same location.
+    const DrawSegment seg1 = DrawSegment::make_arc(Vec2d(0, 0), Vec2d(0, 0), Vec2d(0, 0));
+    REQUIRE(seg1.type == DrawSegmentType::CircularArc);
+    // Should not throw — accessing fields is safe.
+    REQUIRE_THAT(seg1.length(), WithinAbs(0.0, 1e-9));
+
+    // All three points on a line.
+    const DrawSegment seg2 = DrawSegment::make_arc(Vec2d(0, 0), Vec2d(5, 0), Vec2d(10, 0));
+    REQUIRE(seg2.type == DrawSegmentType::CircularArc);
+    // No crash required; the result is a degenerate segment.
+    REQUIRE_THAT(seg2.ctrl1.x(), WithinAbs(5.0, 1e-9));
+}
+
+TEST_CASE("DrawSegment: backward-compatible aggregate init still compiles", "[DrawSession]")
+{
+    // These three-field aggregate initialisations must continue to compile.
+    DrawSegment line_seg;
+    line_seg.start     = Vec2d(0.0, 0.0);
+    line_seg.end       = Vec2d(10.0, 0.0);
+    line_seg.is_travel = false;
+    REQUIRE(line_seg.type == DrawSegmentType::Line);
+    REQUIRE_THAT(line_seg.ctrl1.norm(), WithinAbs(0.0, 1e-12));
+    REQUIRE_THAT(line_seg.ctrl2.norm(), WithinAbs(0.0, 1e-12));
+}
+
+// ---------------------------------------------------------------------------
+// TASK-005: 3MF round-trip tests for arc/bezier segment types [Draw3mf]
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Build and do a 3MF round-trip for a session containing the given segment.
+// Returns the imported DrawSession from the loaded model (or empty on failure).
+DrawSession roundtrip_draw_session(const DrawSession& src_session)
+{
+    namespace fs = boost::filesystem;
+
+    Model src_model;
+    ModelObject* obj = src_model.add_object("TestDrawPath", "", make_cube(10.0, 10.0, 10.0));
+    obj->add_instance();
+    obj->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+    obj->draw_session = std::make_unique<DrawSession>(src_session);
+
+    // Use a fixed filename to avoid boost::filesystem::unique_path generating
+    // non-ASCII characters that are invalid in narrow strings on Windows.
+    const std::string tmp_str =
+        (fs::temp_directory_path() / "orca_test_3mf_arc_bezier_roundtrip.3mf").string();
+    fs::remove(tmp_str);
+
+    DynamicPrintConfig store_cfg;
+    StoreParams sp;
+    sp.path   = tmp_str.c_str();
+    sp.model  = &src_model;
+    sp.config = &store_cfg;
+    if (!store_bbs_3mf(sp))
+        return DrawSession{};
+
+    Model dst_model;
+    DynamicPrintConfig dst_cfg;
+    ConfigSubstitutionContext ctx{ ForwardCompatibilitySubstitutionRule::Disable };
+    PlateDataPtrs plate_data;
+    bool is_bbl = false, is_orca = false;
+    Semver ver;
+
+    const bool loaded = load_bbs_3mf(
+        tmp_str.c_str(), &dst_cfg, &ctx, &dst_model,
+        &plate_data, nullptr, &is_bbl, &is_orca, &ver, nullptr, LoadStrategy::LoadModel);
+
+    fs::remove(tmp_str);
+    release_PlateData_list(plate_data);
+
+    if (!loaded || dst_model.objects.empty() || !dst_model.objects[0]->draw_session)
+        return DrawSession{};
+
+    return *dst_model.objects[0]->draw_session;
+}
+
+} // anonymous namespace
+
+TEST_CASE("Draw3mf: round-trip line-only session - segment type remains Line", "[Draw3mf]")
+{
+    DrawSession src;
+    src.add_layer(0.2);
+    src.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(10.0, 0.0)));
+
+    const DrawSession dst = roundtrip_draw_session(src);
+    REQUIRE(dst.layer_count() == 1);
+    REQUIRE(dst.layers[0].segments.size() == 1);
+    REQUIRE(dst.layers[0].segments[0].type == DrawSegmentType::Line);
+    REQUIRE_THAT(dst.layers[0].segments[0].start.x(), WithinAbs(0.0,  1e-6));
+    REQUIRE_THAT(dst.layers[0].segments[0].end.x(),   WithinAbs(10.0, 1e-6));
+}
+
+TEST_CASE("Draw3mf: round-trip arc session - type CircularArc, ctrl1 preserved", "[Draw3mf]")
+{
+    DrawSession src;
+    src.add_layer(0.2);
+    src.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(10.0, 0.0), Vec2d(7.07, 7.07), Vec2d(0.0, 10.0)));
+
+    const DrawSession dst = roundtrip_draw_session(src);
+    REQUIRE(dst.layer_count() == 1);
+    REQUIRE(dst.layers[0].segments.size() == 1);
+    const DrawSegment& s = dst.layers[0].segments[0];
+    REQUIRE(s.type == DrawSegmentType::CircularArc);
+    REQUIRE_THAT(s.start.x(),  WithinAbs(10.0, 1e-5));
+    REQUIRE_THAT(s.ctrl1.x(), WithinAbs(7.07, 1e-5));
+    REQUIRE_THAT(s.ctrl1.y(), WithinAbs(7.07, 1e-5));
+    REQUIRE_THAT(s.end.y(),   WithinAbs(10.0, 1e-5));
+}
+
+TEST_CASE("Draw3mf: round-trip bezier session - type CubicBezier, ctrl1 and ctrl2 preserved", "[Draw3mf]")
+{
+    DrawSession src;
+    src.add_layer(0.2);
+    src.layers[0].segments.push_back(
+        DrawSegment::make_bezier(Vec2d(0.0, 0.0), Vec2d(3.0, 8.0), Vec2d(7.0, 8.0), Vec2d(10.0, 0.0)));
+
+    const DrawSession dst = roundtrip_draw_session(src);
+    REQUIRE(dst.layers[0].segments.size() == 1);
+    const DrawSegment& s = dst.layers[0].segments[0];
+    REQUIRE(s.type == DrawSegmentType::CubicBezier);
+    REQUIRE_THAT(s.ctrl1.x(), WithinAbs(3.0, 1e-5));
+    REQUIRE_THAT(s.ctrl1.y(), WithinAbs(8.0, 1e-5));
+    REQUIRE_THAT(s.ctrl2.x(), WithinAbs(7.0, 1e-5));
+    REQUIRE_THAT(s.ctrl2.y(), WithinAbs(8.0, 1e-5));
+}
+
+TEST_CASE("Draw3mf: round-trip mixed session - line + arc + bezier all preserved", "[Draw3mf]")
+{
+    DrawSession src;
+    src.add_layer(0.2);
+    src.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(5.0, 0.0)));
+    src.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(5.0, 0.0), Vec2d(6.0, 1.0), Vec2d(7.0, 0.0)));
+    src.layers[0].segments.push_back(
+        DrawSegment::make_bezier(Vec2d(7.0, 0.0), Vec2d(8.0, 2.0), Vec2d(9.0, 2.0), Vec2d(10.0, 0.0)));
+
+    const DrawSession dst = roundtrip_draw_session(src);
+    REQUIRE(dst.layers[0].segments.size() == 3);
+    REQUIRE(dst.layers[0].segments[0].type == DrawSegmentType::Line);
+    REQUIRE(dst.layers[0].segments[1].type == DrawSegmentType::CircularArc);
+    REQUIRE(dst.layers[0].segments[2].type == DrawSegmentType::CubicBezier);
+}

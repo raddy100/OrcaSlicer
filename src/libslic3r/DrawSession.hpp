@@ -6,14 +6,66 @@
 
 namespace Slic3r {
 
-// A single straight-line move on the build plate.
-// Coordinates are plate-relative (mm), relative to PartPlate::get_origin().
-struct DrawSegment {
-    Vec2d start;        // XY on build plate, plate-relative coords (mm)
-    Vec2d end;          // XY on build plate, plate-relative coords (mm)
-    bool  is_travel;    // true = non-extruding travel move
+// Semantic geometry type of a draw segment.
+// Default is Line for backward compatibility with existing serialised sessions.
+enum class DrawSegmentType {
+    Line,          // straight line from start to end
+    CircularArc,   // arc through ctrl1 (the "through" point) from start to end
+    CubicBezier,   // cubic Bezier with ctrl1 (first CP) and ctrl2 (second CP)
+};
 
+// A single move on the build plate.
+// Coordinates are plate-relative (mm), relative to PartPlate::get_origin().
+// Backward-compatible aggregate: existing code that writes
+//   { Vec2d(…), Vec2d(…), false }
+// continues to compile — type/ctrl1/ctrl2 take their defaults.
+struct DrawSegment {
+    Vec2d           start;                               // XY, plate-relative (mm)
+    Vec2d           end;                                 // XY, plate-relative (mm)
+    bool            is_travel  = false;                  // true = non-extruding travel
+    DrawSegmentType type       = DrawSegmentType::Line;  // geometry kind
+    Vec2d           ctrl1      = Vec2d::Zero();          // arc: through-point; bezier: CP1
+    Vec2d           ctrl2      = Vec2d::Zero();          // bezier: CP2; unused otherwise
+
+    // Chord length (start → end).  Accurate for Line; for Arc/Bezier use
+    // draw_segment_sampled_length() from DrawModeFeedback.hpp instead.
     double length() const { return (end - start).norm(); }
+
+    // Factory helpers — preferred for creating non-line segments.
+    static DrawSegment make_line(Vec2d start, Vec2d end, bool is_travel = false)
+    {
+        DrawSegment s;
+        s.start     = start;
+        s.end       = end;
+        s.is_travel = is_travel;
+        s.type      = DrawSegmentType::Line;
+        return s;
+    }
+
+    // The arc travels from start, through the point `through`, to end.
+    // `through` is stored in ctrl1.
+    static DrawSegment make_arc(Vec2d start, Vec2d through, Vec2d end, bool is_travel = false)
+    {
+        DrawSegment s;
+        s.start     = start;
+        s.end       = end;
+        s.is_travel = is_travel;
+        s.type      = DrawSegmentType::CircularArc;
+        s.ctrl1     = through;
+        return s;
+    }
+
+    static DrawSegment make_bezier(Vec2d start, Vec2d ctrl1, Vec2d ctrl2, Vec2d end, bool is_travel = false)
+    {
+        DrawSegment s;
+        s.start     = start;
+        s.end       = end;
+        s.is_travel = is_travel;
+        s.type      = DrawSegmentType::CubicBezier;
+        s.ctrl1     = ctrl1;
+        s.ctrl2     = ctrl2;
+        return s;
+    }
 };
 
 // One horizontal layer of drawn segments. Z values are baked in at creation
