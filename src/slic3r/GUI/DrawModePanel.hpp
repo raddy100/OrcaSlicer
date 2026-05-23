@@ -28,6 +28,9 @@ namespace GUI {
 class Plater;
 struct PartPlate;
 
+// Drawing tool selection.
+enum class DrawTool { Line, Arc, Bezier };
+
 // Draw Mode panel — lets users draw toolpaths directly on a 2D plate view
 // without needing a 3D model. Shown as a separate top-level tab.
 class DrawModePanel : public wxPanel
@@ -81,11 +84,17 @@ private:
     wxButton*          m_simulate_btn   { nullptr };
     wxButton*          m_finalize_btn   { nullptr };
 
+    // Tool selection for drawing mode
+    wxToggleButton*    m_line_tool_btn  { nullptr };
+    wxToggleButton*    m_arc_tool_btn   { nullptr };
+    wxToggleButton*    m_curve_tool_btn { nullptr };
+
     // State
     Plater*      m_plater        { nullptr };
     DrawSession  m_session;
     DrawInputMode m_input_mode   { DrawInputMode::Drawing };
     int          m_editing_obj_idx{ -1 }; // >=0 when editing existing object
+    DrawTool     m_draw_tool     { DrawTool::Line }; // active drawing tool
 
     // Plate origin snapshot (plate-relative, set during activate())
     double       m_plate_x { 0.0 };
@@ -116,7 +125,9 @@ private:
 
     struct DrawDraftSegment {
         bool                  active = false;
+        DrawTool              tool   { DrawTool::Line };
         Vec2d                 start { 0.0, 0.0 };
+        std::vector<Vec2d>    intermediate_clicks; // arc: [through_point]; bezier: [ctrl1, ctrl2]
         Vec2d                 raw_mouse { 0.0, 0.0 };
         Vec2d                 grid_snapped_mouse { 0.0, 0.0 };
         Vec2d                 constrained_end { 0.0, 0.0 };
@@ -133,6 +144,15 @@ private:
     int                  m_sel_layer_idx { -1 };
     int                  m_sel_seg_idx   { -1 };
     std::optional<EndpointRef>  m_dragging_ep;
+
+    // Reference to a control handle being dragged in edit mode
+    struct ControlHandleRef {
+        int layer_index;
+        int segment_index;
+        int ctrl_idx; // 0 = ctrl1, 1 = ctrl2
+    };
+    std::optional<ControlHandleRef> m_dragging_ctrl;
+
     Vec2d                m_drag_preview  { 0.0, 0.0 };
     bool                 m_is_dragging   { false };
 
@@ -186,6 +206,9 @@ private:
     // Button handlers
     void on_draw_toggle(wxCommandEvent& evt);
     void on_edit_toggle(wxCommandEvent& evt);
+    void on_line_tool(wxCommandEvent& evt);
+    void on_arc_tool(wxCommandEvent& evt);
+    void on_curve_tool(wxCommandEvent& evt);
     void on_fill_toggle(wxCommandEvent& evt);
     void on_snap_toggle(wxCommandEvent& evt);
     void on_grid_res_change(wxCommandEvent& evt);

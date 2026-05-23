@@ -49,6 +49,13 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     // Mode toggles
     m_draw_toggle = new wxToggleButton(this, wxID_ANY, "Draw");
     m_edit_toggle = new wxToggleButton(this, wxID_ANY, "Edit");
+    m_line_tool_btn  = new wxToggleButton(this, wxID_ANY, "Line");
+    m_arc_tool_btn   = new wxToggleButton(this, wxID_ANY, "Arc");
+    m_curve_tool_btn = new wxToggleButton(this, wxID_ANY, "Curve");
+    m_line_tool_btn->SetToolTip("Draw straight lines (2 clicks)");
+    m_arc_tool_btn->SetToolTip("Draw circular arcs (3 clicks: start, through-point, end)");
+    m_curve_tool_btn->SetToolTip("Draw cubic bezier curves (4 clicks: start, ctrl1, ctrl2, end)");
+    m_line_tool_btn->SetValue(true); // Line is the default
     m_fill_toggle = new wxToggleButton(this, wxID_ANY, "Fill Width");
     m_snap_toggle = new wxToggleButton(this, wxID_ANY, "Snap");
     {
@@ -92,6 +99,9 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     top_sizer->Add(m_banner_text, 1, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_draw_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_edit_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_line_tool_btn,  0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_arc_tool_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_curve_tool_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_fill_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_snap_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(new wxStaticText(this, wxID_ANY, "Grid:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
@@ -124,6 +134,9 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     // Bind events
     m_draw_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_draw_toggle, this);
     m_edit_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_edit_toggle, this);
+    m_line_tool_btn->Bind(wxEVT_TOGGLEBUTTON,  &DrawModePanel::on_line_tool,  this);
+    m_arc_tool_btn->Bind(wxEVT_TOGGLEBUTTON,   &DrawModePanel::on_arc_tool,   this);
+    m_curve_tool_btn->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_curve_tool, this);
     m_fill_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_fill_toggle, this);
     m_snap_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_snap_toggle, this);
     m_grid_res_choice->Bind(wxEVT_CHOICE, &DrawModePanel::on_grid_res_change, this);
@@ -157,6 +170,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
         // Capture lost externally  -  clean up drag state without calling ReleaseMouse
         m_is_dragging = false;
         m_dragging_ep.reset();
+        m_dragging_ctrl.reset();
         m_pan_start.reset();
         m_canvas->SetCursor(wxCursor(wxCURSOR_CROSS));
         if (m_canvas) m_canvas->Refresh(false);
@@ -206,7 +220,14 @@ void DrawModePanel::activate(PartPlate* plate)
     m_sel_layer_idx = -1;
     m_sel_seg_idx   = -1;
     m_dragging_ep.reset();
+    m_dragging_ctrl.reset();
     m_is_dragging   = false;
+
+    // Reset tool selection
+    m_draw_tool = DrawTool::Line;
+    if (m_line_tool_btn)  m_line_tool_btn->SetValue(true);
+    if (m_arc_tool_btn)   m_arc_tool_btn->SetValue(false);
+    if (m_curve_tool_btn) m_curve_tool_btn->SetValue(false);
 
     if (restore_existing_draw_object(plate))
         return;
@@ -262,6 +283,12 @@ void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
     m_zoom_factor = DRAW_MODE_DEFAULT_ZOOM_FACTOR;
     m_pan_offset = Vec2d(0.0, 0.0);
     m_pan_start.reset();
+
+    // Reset tool selection
+    m_draw_tool = DrawTool::Line;
+    if (m_line_tool_btn)  m_line_tool_btn->SetValue(true);
+    if (m_arc_tool_btn)   m_arc_tool_btn->SetValue(false);
+    if (m_curve_tool_btn) m_curve_tool_btn->SetValue(false);
 
     if (m_plater) {
         const DrawModeDisplayPreferences& prefs = m_plater->model().draw_mode_display_preferences;
@@ -556,14 +583,27 @@ bool DrawModePanel::commit_draft_segment()
     if (m_draft.length_mm <= DRAW_MODE_MIN_SEGMENT_LENGTH_MM)
         return false;
 
-    DrawSegment seg;
-    seg.start     = m_draft.start;
-    seg.end       = m_draft.constrained_end;
-    seg.is_travel = false;
-    dispatch_command(std::make_unique<AddSegmentCommand>(active, std::move(seg)));
+    Vec2d start = m_draft.start;
+    Vec2d end   = m_draft.constrained_end;
+    if ((end - start).squaredNorm() < 1e-12)
+        return false;
 
-    m_pending_start = m_draft.constrained_end;
-    const Vec2d next_raw = m_draft.constrained_end;
+    DrawSegment new_seg;
+    if (m_draw_tool == DrawTool::Arc && m_draft.intermediate_clicks.size() >= 1) {
+        new_seg = DrawSegment::make_arc(start, m_draft.intermediate_clicks[0], end);
+    } else if (m_draw_tool == DrawTool::Bezier && m_draft.intermediate_clicks.size() >= 2) {
+        new_seg = DrawSegment::make_bezier(start, m_draft.intermediate_clicks[0],
+                                            m_draft.intermediate_clicks[1], end);
+    } else {
+        new_seg = DrawSegment::make_line(start, end);
+    }
+
+    dispatch_command(std::make_unique<AddSegmentCommand>(active, std::move(new_seg)));
+
+    // Chain anchor: next segment starts at the end of this one
+    m_pending_start = end;
+    m_draft.intermediate_clicks.clear();
+    const Vec2d next_raw = end;
     m_draft = DrawDraftSegment();
     m_draft.raw_mouse = next_raw;
     update_draft(next_raw);
@@ -791,10 +831,16 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
             bool is_sel = (m_sel_layer_idx == li && m_sel_seg_idx == si);
 
             if (is_sel) {
-                // Selected segment  -  bright yellow
+                // Selected segment  -  bright yellow (sampled for curves)
                 dc.SetPen(wxPen(wxColour(255, 255, 0), 3));
                 dc.SetBrush(wxBrush(wxColour(255, 255, 0)));
-                dc.DrawLine(p1, p2);
+                if (seg.type == DrawSegmentType::Line) {
+                    dc.DrawLine(p1, p2);
+                } else {
+                    auto pts = draw_sample_segment(seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                    for (size_t k = 1; k < pts.size(); ++k)
+                        dc.DrawLine(plate_to_screen(pts[k-1]), plate_to_screen(pts[k]));
+                }
                 dc.DrawCircle(p1, 4);
                 dc.DrawCircle(p2, 4);
             } else if (seg.is_travel) {
@@ -803,22 +849,25 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
                 dc.SetPen(wxPen(c, 1, wxPENSTYLE_SHORT_DASH));
                 dc.DrawLine(p1, p2);
             } else if (m_show_filled && is_active) {
-                // Filled nozzle-width quad for extrusion on active layer
-                Vec2d dv = seg.end - seg.start;
-                double dlen = dv.norm();
-                if (dlen > 1e-6) {
-                    Vec2d dir = dv / dlen;
-                    Vec2d perp(-dir.y(), dir.x());
-                    double hw = m_nozzle_d * 0.5;
-                    wxPoint pts[4] = {
-                        plate_to_screen(seg.start - perp * hw),
-                        plate_to_screen(seg.start + perp * hw),
-                        plate_to_screen(seg.end   + perp * hw),
-                        plate_to_screen(seg.end   - perp * hw),
-                    };
-                    dc.SetPen(wxPen(wxColour(255, 100, 0), 1));
-                    dc.SetBrush(wxBrush(wxColour(200, 75, 0)));
-                    dc.DrawPolygon(4, pts);
+                // Filled nozzle-width strip along the sampled polyline
+                double hw = m_nozzle_d * 0.5;
+                dc.SetPen(wxPen(wxColour(255, 100, 0), 1));
+                dc.SetBrush(wxBrush(wxColour(200, 75, 0)));
+                auto pts = draw_sample_segment(seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                for (size_t k = 1; k < pts.size(); ++k) {
+                    Vec2d dv = pts[k] - pts[k-1];
+                    double dlen = dv.norm();
+                    if (dlen > 1e-6) {
+                        Vec2d dir = dv / dlen;
+                        Vec2d perp(-dir.y(), dir.x());
+                        wxPoint quad[4] = {
+                            plate_to_screen(pts[k-1] - perp * hw),
+                            plate_to_screen(pts[k-1] + perp * hw),
+                            plate_to_screen(pts[k]   + perp * hw),
+                            plate_to_screen(pts[k]   - perp * hw),
+                        };
+                        dc.DrawPolygon(4, quad);
+                    }
                 }
             } else {
                 // Wire extrusion line
@@ -826,33 +875,115 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
                 int lw = is_active ? 2 : 1;
                 dc.SetPen(wxPen(c, lw));
                 dc.SetBrush(wxBrush(c));
-                dc.DrawLine(p1, p2);
-                if (is_active) {
-                    dc.DrawCircle(p1, 3);
-                    dc.DrawCircle(p2, 3);
+                if (seg.type == DrawSegmentType::Line) {
+                    dc.DrawLine(p1, p2);
+                    if (is_active) {
+                        dc.DrawCircle(p1, 3);
+                        dc.DrawCircle(p2, 3);
+                    }
+                } else {
+                    auto pts = draw_sample_segment(seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                    for (size_t k = 1; k < pts.size(); ++k)
+                        dc.DrawLine(plate_to_screen(pts[k-1]), plate_to_screen(pts[k]));
+                    if (is_active) {
+                        dc.DrawCircle(p1, 3);
+                        dc.DrawCircle(p2, 3);
+                    }
                 }
             }
         }
     }
 
-    // Drawing mode: pending start + preview line
+    // Drawing mode: pending start + preview (tool-aware)
     if (m_input_mode == DrawInputMode::Drawing && m_draft.active) {
         wxPoint ps = plate_to_screen(m_draft.start);
         wxPoint pm_draw = plate_to_screen(m_draft.constrained_end);
-        // Rubber-band preview line
-        dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
-        dc.DrawLine(ps, pm_draw);
-        // Filled anchor dot  -  shows the active chain start point
-        dc.SetPen(wxPen(wxColour(255, 200, 50), 2));
-        dc.SetBrush(wxBrush(wxColour(255, 200, 50)));
-        dc.DrawCircle(ps, 5);
-        dc.DrawCircle(pm_draw, 4);
-        dc.SetBrush(*wxTRANSPARENT_BRUSH);
 
-        if (m_show_measurements && m_draft.length_mm > DRAW_MODE_MIN_SEGMENT_LENGTH_MM) {
-            const wxString label = wxString::FromUTF8(draw_format_length_mm(m_draft.length_mm))
-                + "\n" + wxString::FromUTF8(draw_format_angle_degrees(m_draft.angle_degrees)) + " from previous";
-            draw_feedback_label(dc, label, wxPoint((ps.x + pm_draw.x) / 2 + 8, (ps.y + pm_draw.y) / 2 - 28), sz);
+        if (m_draw_tool == DrawTool::Line) {
+            // Rubber-band preview line
+            dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
+            dc.DrawLine(ps, pm_draw);
+            dc.SetPen(wxPen(wxColour(255, 200, 50), 2));
+            dc.SetBrush(wxBrush(wxColour(255, 200, 50)));
+            dc.DrawCircle(ps, 5);
+            dc.DrawCircle(pm_draw, 4);
+            dc.SetBrush(*wxTRANSPARENT_BRUSH);
+
+            if (m_show_measurements && m_draft.length_mm > DRAW_MODE_MIN_SEGMENT_LENGTH_MM) {
+                const wxString label = wxString::FromUTF8(draw_format_length_mm(m_draft.length_mm))
+                    + "\n" + wxString::FromUTF8(draw_format_angle_degrees(m_draft.angle_degrees)) + " from previous";
+                draw_feedback_label(dc, label, wxPoint((ps.x + pm_draw.x) / 2 + 8, (ps.y + pm_draw.y) / 2 - 28), sz);
+            }
+        } else if (m_draw_tool == DrawTool::Arc) {
+            dc.SetBrush(wxBrush(wxColour(255, 200, 50)));
+            dc.SetPen(wxPen(wxColour(255, 200, 50), 2));
+            dc.DrawCircle(ps, 5); // start anchor
+
+            Vec2d start_pos  = m_draft.start;
+            Vec2d mouse_pos  = m_draft.constrained_end;
+
+            if (m_draft.intermediate_clicks.empty()) {
+                // Only start: rubber-band line to mouse
+                dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
+                dc.DrawLine(ps, pm_draw);
+                dc.DrawCircle(pm_draw, 4);
+            } else {
+                // Through-point committed: show live arc preview
+                Vec2d through = m_draft.intermediate_clicks[0];
+                wxPoint pt = plate_to_screen(through);
+                dc.DrawCircle(pt, 4); // through-point dot
+
+                DrawSegment preview_seg = DrawSegment::make_arc(start_pos, through, mouse_pos);
+                auto pts = draw_sample_segment(preview_seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
+                for (size_t k = 1; k < pts.size(); ++k)
+                    dc.DrawLine(plate_to_screen(pts[k-1]), plate_to_screen(pts[k]));
+                dc.DrawCircle(pm_draw, 4);
+            }
+            dc.SetBrush(*wxTRANSPARENT_BRUSH);
+        } else { // DrawTool::Bezier
+            dc.SetBrush(wxBrush(wxColour(255, 200, 50)));
+            dc.SetPen(wxPen(wxColour(255, 200, 50), 2));
+            dc.DrawCircle(ps, 5); // start anchor
+
+            Vec2d start_pos = m_draft.start;
+            Vec2d mouse_pos = m_draft.constrained_end;
+
+            if (m_draft.intermediate_clicks.empty()) {
+                // Only start: rubber-band line to mouse
+                dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
+                dc.DrawLine(ps, pm_draw);
+                dc.DrawCircle(pm_draw, 4);
+            } else if (m_draft.intermediate_clicks.size() == 1) {
+                // ctrl1 committed; mouse is the tentative ctrl2
+                Vec2d ctrl1 = m_draft.intermediate_clicks[0];
+                wxPoint pc1 = plate_to_screen(ctrl1);
+                dc.DrawCircle(pc1, 4);
+                dc.SetPen(wxPen(wxColour(200, 150, 255), 1, wxPENSTYLE_SHORT_DASH));
+                dc.DrawLine(ps, pc1); // handle line start → ctrl1
+                dc.DrawLine(pm_draw, pc1); // handle line mouse → ctrl1 (approximate)
+                dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
+                dc.DrawCircle(pm_draw, 4);
+            } else {
+                // ctrl1 and ctrl2 committed; end is mouse
+                Vec2d ctrl1 = m_draft.intermediate_clicks[0];
+                Vec2d ctrl2 = m_draft.intermediate_clicks[1];
+                wxPoint pc1 = plate_to_screen(ctrl1);
+                wxPoint pc2 = plate_to_screen(ctrl2);
+                dc.DrawCircle(pc1, 4);
+                dc.DrawCircle(pc2, 4);
+                dc.SetPen(wxPen(wxColour(200, 150, 255), 1, wxPENSTYLE_SHORT_DASH));
+                dc.DrawLine(ps, pc1);
+                dc.DrawLine(pm_draw, pc2);
+
+                DrawSegment preview_seg = DrawSegment::make_bezier(start_pos, ctrl1, ctrl2, mouse_pos);
+                auto pts = draw_sample_segment(preview_seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
+                for (size_t k = 1; k < pts.size(); ++k)
+                    dc.DrawLine(plate_to_screen(pts[k-1]), plate_to_screen(pts[k]));
+                dc.DrawCircle(pm_draw, 4);
+            }
+            dc.SetBrush(*wxTRANSPARENT_BRUSH);
         }
     }
 
@@ -860,11 +991,24 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
     {
         wxString hint;
         if (m_input_mode == DrawInputMode::Drawing) {
-            hint = m_pending_start
-                ? wxString("Axis snap \u2022 Ctrl: 45\u00b0 \u2022 Alt: free \u2022 Type length + Enter \u2022 Right-click/Snip/Esc breaks")
-                : wxString("Click to start drawing \u2022 New segments default to horizontal/vertical");
+            if (m_draw_tool == DrawTool::Line) {
+                hint = m_pending_start
+                    ? wxString("Axis snap \u2022 Ctrl: 45\u00b0 \u2022 Alt: free \u2022 Type length + Enter \u2022 Right-click/Snip/Esc breaks")
+                    : wxString("Line: Click to start \u2022 Default horizontal/vertical snap");
+            } else if (m_draw_tool == DrawTool::Arc) {
+                size_t n = m_draft.intermediate_clicks.size();
+                if (!m_pending_start)     hint = "Arc: Click start point";
+                else if (n == 0)          hint = "Arc: Click through-point (point on arc)";
+                else                      hint = "Arc: Click end point to commit \u2022 Right-click/Esc cancels";
+            } else {
+                size_t n = m_draft.intermediate_clicks.size();
+                if (!m_pending_start)     hint = "Curve: Click start point";
+                else if (n == 0)          hint = "Curve: Click first control point";
+                else if (n == 1)          hint = "Curve: Click second control point";
+                else                      hint = "Curve: Click end point to commit \u2022 Right-click/Esc cancels";
+            }
         } else {
-            hint = "Click segment to select \u2022 Drag endpoints \u2022 Arrow keys nudge (Shift = 1 mm) \u2022 Del removes";
+            hint = "Click segment to select \u2022 Drag endpoints or handles \u2022 Arrow keys nudge (Shift = 1 mm) \u2022 Del removes";
         }
         dc.SetFont(wxFont(8, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL));
         dc.SetTextForeground(wxColour(160, 160, 160));
@@ -879,6 +1023,53 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         for (const DrawSegment& seg : m_session.layers[active].segments) {
             dc.DrawCircle(plate_to_screen(seg.start), 5);
             dc.DrawCircle(plate_to_screen(seg.end),   5);
+        }
+
+        // Control handle indicators for arc/bezier segments
+        dc.SetBrush(*wxTRANSPARENT_BRUSH);
+        for (const DrawSegment& seg : m_session.layers[active].segments) {
+            if (seg.type == DrawSegmentType::CircularArc) {
+                wxPoint pc = plate_to_screen(seg.ctrl1);
+                dc.SetPen(wxPen(wxColour(200, 150, 255), 1, wxPENSTYLE_SHORT_DASH));
+                dc.DrawLine(plate_to_screen(seg.start), pc);
+                dc.DrawLine(plate_to_screen(seg.end), pc);
+                dc.SetPen(wxPen(wxColour(200, 150, 255), 2));
+                dc.DrawCircle(pc, 4);
+            } else if (seg.type == DrawSegmentType::CubicBezier) {
+                wxPoint pc1 = plate_to_screen(seg.ctrl1);
+                wxPoint pc2 = plate_to_screen(seg.ctrl2);
+                dc.SetPen(wxPen(wxColour(200, 150, 255), 1, wxPENSTYLE_SHORT_DASH));
+                dc.DrawLine(plate_to_screen(seg.start), pc1);
+                dc.DrawLine(plate_to_screen(seg.end), pc2);
+                dc.SetPen(wxPen(wxColour(200, 150, 255), 2));
+                dc.DrawCircle(pc1, 4);
+                dc.DrawCircle(pc2, 4);
+            }
+        }
+    }
+
+    // Edit mode: drag-in-progress preview (control handle)
+    if (m_is_dragging && m_dragging_ctrl.has_value()) {
+        const ControlHandleRef& ch = *m_dragging_ctrl;
+        if (ch.layer_index >= 0 && ch.layer_index < m_session.layer_count()
+                && ch.segment_index >= 0
+                && ch.segment_index < (int)m_session.layers[ch.layer_index].segments.size()) {
+            const DrawSegment& dseg = m_session.layers[ch.layer_index].segments[ch.segment_index];
+            // Build a preview segment with the dragged control point
+            DrawSegment preview = dseg;
+            if (ch.ctrl_idx == 0) preview.ctrl1 = m_drag_preview;
+            else                  preview.ctrl2 = m_drag_preview;
+
+            // Draw the updated arc/bezier preview
+            auto pts = draw_sample_segment(preview, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+            dc.SetPen(wxPen(wxColour(255, 255, 0), 2, wxPENSTYLE_SHORT_DASH));
+            for (size_t k = 1; k < pts.size(); ++k)
+                dc.DrawLine(plate_to_screen(pts[k-1]), plate_to_screen(pts[k]));
+
+            // Control handle indicator
+            dc.SetPen(wxPen(wxColour(255, 255, 0), 2));
+            dc.SetBrush(*wxTRANSPARENT_BRUSH);
+            dc.DrawCircle(plate_to_screen(m_drag_preview), 5);
         }
     }
 
@@ -908,7 +1099,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         const DrawSegment& seg = layer.segments[m_sel_seg_idx];
         wxPoint p1 = plate_to_screen(seg.start);
         wxPoint p2 = plate_to_screen(seg.end);
-        const wxString label = wxString::FromUTF8(draw_format_length_mm(seg.length()))
+        const wxString label = wxString::FromUTF8(draw_format_length_mm(draw_display_length_mm(seg)))
             + "\n" + wxString::FromUTF8(draw_format_angle_degrees(draw_segment_relative_angle_degrees(layer, m_sel_seg_idx)))
             + " from previous";
         draw_feedback_label(dc, label, wxPoint((p1.x + p2.x) / 2 + 8, (p1.y + p2.y) / 2 - 28), sz);
@@ -944,6 +1135,36 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
         const DrawTransform hit_t = get_draw_transform();
         double thr = hit_t.scale > 0 ? 8.0 / hit_t.scale : 1.0;
 
+        // Priority 0: control handles (for arc/bezier)
+        int ctrl_seg = -1; int ctrl_ctrl_idx = 0; double best_ctrl = thr;
+        for (int si = 0; si < (int)layer.segments.size(); ++si) {
+            const DrawSegment& seg = layer.segments[si];
+            if (seg.type == DrawSegmentType::CircularArc) {
+                double d = (pos - seg.ctrl1).norm();
+                if (d < best_ctrl) { best_ctrl = d; ctrl_seg = si; ctrl_ctrl_idx = 0; }
+            } else if (seg.type == DrawSegmentType::CubicBezier) {
+                double d1 = (pos - seg.ctrl1).norm();
+                if (d1 < best_ctrl) { best_ctrl = d1; ctrl_seg = si; ctrl_ctrl_idx = 0; }
+                double d2 = (pos - seg.ctrl2).norm();
+                if (d2 < best_ctrl) { best_ctrl = d2; ctrl_seg = si; ctrl_ctrl_idx = 1; }
+            }
+        }
+        if (ctrl_seg >= 0) {
+            const DrawSegment& cseg = layer.segments[ctrl_seg];
+            Vec2d ctrl_pos = (ctrl_ctrl_idx == 0) ? cseg.ctrl1 : cseg.ctrl2;
+            m_dragging_ctrl = ControlHandleRef{active, ctrl_seg, ctrl_ctrl_idx};
+            m_drag_preview  = ctrl_pos;
+            m_is_dragging   = true;
+            m_dragging_ep.reset();
+            m_pending_start.reset();
+            reset_draft(true);
+            m_sel_layer_idx = active;
+            m_sel_seg_idx   = ctrl_seg;
+            if (!m_canvas->HasCapture()) m_canvas->CaptureMouse();
+            m_canvas->Refresh(false);
+            return;
+        }
+
         // Priority 1: endpoints
         int ep_seg = -1; bool ep_is_start = false; double best_ep = thr;
         for (int si = 0; si < (int)layer.segments.size(); ++si) {
@@ -958,6 +1179,7 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
             m_dragging_ep   = EndpointRef{active, ep_seg, ep_is_start};
             m_drag_preview  = ep;
             m_is_dragging   = true;
+            m_dragging_ctrl.reset();
             m_pending_start.reset();
             reset_draft(true);
             m_sel_layer_idx = -1;
@@ -967,17 +1189,29 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
             return;
         }
 
-        // Priority 2: segment bodies
+        // Priority 2: segment bodies (use sampled polylines for curves)
         int body_seg = -1; double best_body = thr;
         for (int si = 0; si < (int)layer.segments.size(); ++si) {
-            double t;
-            double d = DrawModeInputHandler::point_to_segment_distance(
-                pos, layer.segments[si].start, layer.segments[si].end, t);
-            if (d < best_body) { best_body = d; body_seg = si; }
+            const DrawSegment& seg = layer.segments[si];
+            if (seg.type == DrawSegmentType::Line) {
+                double t;
+                double d = DrawModeInputHandler::point_to_segment_distance(
+                    pos, seg.start, seg.end, t);
+                if (d < best_body) { best_body = d; body_seg = si; }
+            } else {
+                auto pts = draw_sample_segment(seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                for (size_t k = 1; k < pts.size(); ++k) {
+                    double t;
+                    double d = DrawModeInputHandler::point_to_segment_distance(
+                        pos, pts[k-1], pts[k], t);
+                    if (d < best_body) { best_body = d; body_seg = si; }
+                }
+            }
         }
         m_sel_layer_idx = (body_seg >= 0) ? active : -1;
         m_sel_seg_idx   = body_seg;
         m_dragging_ep.reset();
+        m_dragging_ctrl.reset();
         m_is_dragging = false;
         m_canvas->Refresh(false);
         return;
@@ -991,12 +1225,48 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
         return;
     }
 
-    if (!m_pending_start) {
-        m_pending_start = pos;
-        update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
-    } else {
-        update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
-        commit_draft_segment();
+    if (m_draw_tool == DrawTool::Line) {
+        // Existing 2-click line behavior
+        if (!m_pending_start) {
+            m_pending_start = pos;
+            update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
+        } else {
+            update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
+            commit_draft_segment();
+        }
+    } else if (m_draw_tool == DrawTool::Arc) {
+        // 3-click arc: start → through-point → end
+        if (!m_pending_start) {
+            // First click: set start
+            m_pending_start = pos;
+            m_draft.intermediate_clicks.clear();
+            m_draft.tool = DrawTool::Arc;
+            update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
+        } else if (m_draft.intermediate_clicks.empty()) {
+            // Second click: set through-point
+            m_draft.intermediate_clicks.push_back(snap_pos(raw_pos));
+            update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
+        } else {
+            // Third click: commit the arc
+            update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
+            commit_draft_segment();
+        }
+    } else { // DrawTool::Bezier
+        // 4-click bezier: start → ctrl1 → ctrl2 → end
+        if (!m_pending_start) {
+            m_pending_start = pos;
+            m_draft.intermediate_clicks.clear();
+            m_draft.tool = DrawTool::Bezier;
+            update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
+        } else if (m_draft.intermediate_clicks.size() < 2) {
+            // Second or third click: add ctrl1 or ctrl2
+            m_draft.intermediate_clicks.push_back(snap_pos(raw_pos));
+            update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
+        } else {
+            // Fourth click: commit the bezier
+            update_draft(raw_pos, evt.ControlDown(), evt.AltDown());
+            commit_draft_segment();
+        }
     }
     if (m_canvas) m_canvas->Refresh(false);
 }
@@ -1009,12 +1279,34 @@ void DrawModePanel::on_canvas_right_down(wxMouseEvent&)
         if (m_canvas->HasCapture()) m_canvas->ReleaseMouse();
         m_is_dragging = false;
         m_dragging_ep.reset();
+        m_dragging_ctrl.reset();
     }
     if (m_canvas) m_canvas->Refresh(false);
 }
 
 void DrawModePanel::on_canvas_left_up(wxMouseEvent& evt)
 {
+    // Check if we were dragging a control handle
+    if (m_dragging_ctrl.has_value()) {
+        if (m_canvas->HasCapture()) m_canvas->ReleaseMouse();
+        const ControlHandleRef& ch = *m_dragging_ctrl;
+        if (ch.layer_index >= 0 && ch.layer_index < m_session.layer_count()
+                && ch.segment_index >= 0
+                && ch.segment_index < (int)m_session.layers[ch.layer_index].segments.size()) {
+            const DrawSegment& seg = m_session.layers[ch.layer_index].segments[ch.segment_index];
+            Vec2d old_pos = (ch.ctrl_idx == 0) ? seg.ctrl1 : seg.ctrl2;
+            Vec2d new_pos = m_drag_preview;
+            if ((new_pos - old_pos).squaredNorm() > 1e-12) {
+                dispatch_command(std::make_unique<MoveControlHandleCommand>(
+                    ch.layer_index, ch.segment_index, ch.ctrl_idx, old_pos, new_pos));
+            }
+        }
+        m_dragging_ctrl.reset();
+        m_is_dragging = false;
+        if (m_canvas) m_canvas->Refresh(false);
+        return;
+    }
+
     if (!m_is_dragging || !m_dragging_ep.has_value()) { evt.Skip(); return; }
     if (m_canvas->HasCapture()) m_canvas->ReleaseMouse();
 
@@ -1059,7 +1351,10 @@ void DrawModePanel::on_canvas_motion(wxMouseEvent& evt)
         return;
     }
     
-    if (m_is_dragging && m_dragging_ep.has_value()) {
+    if (m_is_dragging && m_dragging_ctrl.has_value()) {
+        // Control handle drag: update drag preview to snapped mouse
+        m_drag_preview = m_mouse_plate;
+    } else if (m_is_dragging && m_dragging_ep.has_value()) {
         const EndpointRef& ep = *m_dragging_ep;
         if (ep.layer_index >= 0 && ep.layer_index < m_session.layer_count()
                 && ep.segment_index >= 0 && ep.segment_index < (int)m_session.layers[ep.layer_index].segments.size()) {
@@ -1125,8 +1420,13 @@ void DrawModePanel::on_draw_toggle(wxCommandEvent&)
     m_sel_layer_idx = -1;
     m_sel_seg_idx   = -1;
     m_dragging_ep.reset();
+    m_dragging_ctrl.reset();
     m_is_dragging   = false;
     reset_draft(false);
+    // Re-assert the current tool button state
+    if (m_line_tool_btn)  m_line_tool_btn->SetValue(m_draw_tool == DrawTool::Line);
+    if (m_arc_tool_btn)   m_arc_tool_btn->SetValue(m_draw_tool == DrawTool::Arc);
+    if (m_curve_tool_btn) m_curve_tool_btn->SetValue(m_draw_tool == DrawTool::Bezier);
     if (m_canvas) m_canvas->Refresh(false);
 }
 
@@ -1527,6 +1827,37 @@ void DrawModePanel::on_snip(wxCommandEvent&)
 {
     // Break the continuous chain. Next left-click starts a new extrusion path.
     // The G-code generator will insert a retract + travel between the two paths.
+    m_draft.intermediate_clicks.clear();
+    reset_draft(false);
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_line_tool(wxCommandEvent&)
+{
+    m_draw_tool = DrawTool::Line;
+    m_line_tool_btn->SetValue(true);
+    m_arc_tool_btn->SetValue(false);
+    m_curve_tool_btn->SetValue(false);
+    reset_draft(false);
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_arc_tool(wxCommandEvent&)
+{
+    m_draw_tool = DrawTool::Arc;
+    m_line_tool_btn->SetValue(false);
+    m_arc_tool_btn->SetValue(true);
+    m_curve_tool_btn->SetValue(false);
+    reset_draft(false);
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_curve_tool(wxCommandEvent&)
+{
+    m_draw_tool = DrawTool::Bezier;
+    m_line_tool_btn->SetValue(false);
+    m_arc_tool_btn->SetValue(false);
+    m_curve_tool_btn->SetValue(true);
     reset_draft(false);
     if (m_canvas) m_canvas->Refresh(false);
 }
