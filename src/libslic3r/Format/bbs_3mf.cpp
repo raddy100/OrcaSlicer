@@ -2659,6 +2659,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     seg.start     = Vec2d(st.get<double>("<xmlattr>.sx"), st.get<double>("<xmlattr>.sy"));
                     seg.end       = Vec2d(st.get<double>("<xmlattr>.ex"), st.get<double>("<xmlattr>.ey"));
                     seg.is_travel = st.get<int>("<xmlattr>.is_travel", 0) != 0;
+
+                    const std::string seg_type = st.get<std::string>("<xmlattr>.type", "line");
+                    if (seg_type == "arc") {
+                        seg.type  = DrawSegmentType::CircularArc;
+                        seg.ctrl1 = Vec2d(st.get<double>("<xmlattr>.c1x", 0.0),
+                                          st.get<double>("<xmlattr>.c1y", 0.0));
+                    } else if (seg_type == "bezier") {
+                        seg.type  = DrawSegmentType::CubicBezier;
+                        seg.ctrl1 = Vec2d(st.get<double>("<xmlattr>.c1x", 0.0),
+                                          st.get<double>("<xmlattr>.c1y", 0.0));
+                        seg.ctrl2 = Vec2d(st.get<double>("<xmlattr>.c2x", 0.0),
+                                          st.get<double>("<xmlattr>.c2y", 0.0));
+                    } else {
+                        seg.type = DrawSegmentType::Line;
+                    }
                     layer.segments.push_back(seg);
                 }
                 session.layers.push_back(layer);
@@ -7468,7 +7483,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             const DrawSession& session = *object->draw_session;
             pt::ptree tree;
             pt::ptree& root = tree.add("draw_session", "");
-            root.put("<xmlattr>.version", "1");
+            root.put("<xmlattr>.version", "2");
             root.put("<xmlattr>.layer_count", session.layer_count());
 
             for (const DrawLayer& layer : session.layers) {
@@ -7479,11 +7494,24 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                 for (const DrawSegment& seg : layer.segments) {
                     pt::ptree& seg_node = layer_node.add("segment", "");
-                    seg_node.put("<xmlattr>.sx",       seg.start.x());
-                    seg_node.put("<xmlattr>.sy",       seg.start.y());
-                    seg_node.put("<xmlattr>.ex",       seg.end.x());
-                    seg_node.put("<xmlattr>.ey",       seg.end.y());
+                    seg_node.put("<xmlattr>.sx",        seg.start.x());
+                    seg_node.put("<xmlattr>.sy",        seg.start.y());
+                    seg_node.put("<xmlattr>.ex",        seg.end.x());
+                    seg_node.put("<xmlattr>.ey",        seg.end.y());
                     seg_node.put("<xmlattr>.is_travel", seg.is_travel ? 1 : 0);
+
+                    if (seg.type == DrawSegmentType::CircularArc) {
+                        seg_node.put("<xmlattr>.type", "arc");
+                        seg_node.put("<xmlattr>.c1x",  seg.ctrl1.x());
+                        seg_node.put("<xmlattr>.c1y",  seg.ctrl1.y());
+                    } else if (seg.type == DrawSegmentType::CubicBezier) {
+                        seg_node.put("<xmlattr>.type", "bezier");
+                        seg_node.put("<xmlattr>.c1x",  seg.ctrl1.x());
+                        seg_node.put("<xmlattr>.c1y",  seg.ctrl1.y());
+                        seg_node.put("<xmlattr>.c2x",  seg.ctrl2.x());
+                        seg_node.put("<xmlattr>.c2y",  seg.ctrl2.y());
+                    }
+                    // Line segments omit the type attribute (v1 compatible).
                 }
             }
 
