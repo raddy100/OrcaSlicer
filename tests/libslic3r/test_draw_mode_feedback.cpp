@@ -9,6 +9,7 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 
 #include <boost/filesystem/operations.hpp>
+#include <cmath>
 #include <limits>
 #include <memory>
 
@@ -220,4 +221,220 @@ TEST_CASE("DrawModeFeedback: pan bounds keep zoomed plate reachable", "[DrawMode
     const Vec2d lower_right = draw_clamp_pan_offset(Vec2d(300.0, 300.0), 256.0, 256.0, 2.0);
     REQUIRE_THAT(lower_right.x(), WithinAbs(128.0, 1e-9));
     REQUIRE_THAT(lower_right.y(), WithinAbs(128.0, 1e-9));
+}
+
+// ---------------------------------------------------------------------------
+// TASK-003 + TASK-004: Path sampling and updated translate/display helpers
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DrawPathSampling: line segment returns exactly 2 points", "[DrawPathSampling]")
+{
+    const DrawSegment seg = DrawSegment::make_line(Vec2d(1.0, 2.0), Vec2d(7.0, 6.0));
+    const std::vector<Vec2d> pts = draw_sample_segment(seg);
+    REQUIRE(pts.size() == 2);
+    REQUIRE_THAT(pts.front().x(), WithinAbs(1.0, 1e-12));
+    REQUIRE_THAT(pts.front().y(), WithinAbs(2.0, 1e-12));
+    REQUIRE_THAT(pts.back().x(),  WithinAbs(7.0, 1e-12));
+    REQUIRE_THAT(pts.back().y(),  WithinAbs(6.0, 1e-12));
+}
+
+TEST_CASE("DrawPathSampling: 90-degree CCW arc - first==start, last==end, all on circle", "[DrawPathSampling]")
+{
+    // Centre (0,0), R=10; from (10,0) through (7.071,7.071) to (0,10) — CCW quarter circle.
+    constexpr double R = 10.0;
+    const double cos45 = std::cos(M_PI / 4.0);
+    const DrawSegment seg = DrawSegment::make_arc(
+        Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R));
+
+    const std::vector<Vec2d> pts = draw_sample_segment(seg, 0.01);
+    REQUIRE(pts.size() >= 2);
+
+    // First and last must be exact.
+    REQUIRE_THAT(pts.front().x(), WithinAbs(R,   1e-10));
+    REQUIRE_THAT(pts.front().y(), WithinAbs(0.0, 1e-10));
+    REQUIRE_THAT(pts.back().x(),  WithinAbs(0.0, 1e-10));
+    REQUIRE_THAT(pts.back().y(),  WithinAbs(R,   1e-10));
+
+    // All intermediate points should lie on the circle within tolerance.
+    for (const Vec2d& p : pts) {
+        REQUIRE(std::isfinite(p.x()));
+        REQUIRE(std::isfinite(p.y()));
+        REQUIRE_THAT(p.norm(), WithinAbs(R, 0.02)); // within 2 × chord-tol of circle
+    }
+}
+
+TEST_CASE("DrawPathSampling: 180-degree arc - first==start, last==end", "[DrawPathSampling]")
+{
+    // Centre (0,5), R=5; from (0,0) through (5,5) to (0,10) — CCW semicircle.
+    const DrawSegment seg = DrawSegment::make_arc(Vec2d(0.0, 0.0), Vec2d(5.0, 5.0), Vec2d(0.0, 10.0));
+    const std::vector<Vec2d> pts = draw_sample_segment(seg, 0.05);
+    REQUIRE(pts.size() >= 2);
+    REQUIRE_THAT(pts.front().x(), WithinAbs(0.0,  1e-10));
+    REQUIRE_THAT(pts.front().y(), WithinAbs(0.0,  1e-10));
+    REQUIRE_THAT(pts.back().x(),  WithinAbs(0.0,  1e-10));
+    REQUIRE_THAT(pts.back().y(),  WithinAbs(10.0, 1e-10));
+}
+
+TEST_CASE("DrawPathSampling: CCW arc has CCW point order", "[DrawPathSampling]")
+{
+    // Arc from (10,0) through (7.071,7.071) to (0,10): CCW — x decreases, y increases.
+    constexpr double R = 10.0;
+    const double cos45 = std::cos(M_PI / 4.0);
+    const DrawSegment seg = DrawSegment::make_arc(
+        Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R));
+
+    const std::vector<Vec2d> pts = draw_sample_segment(seg, 0.05);
+    REQUIRE(pts.size() >= 3);
+
+    // For CCW quarter circle from (10,0) to (0,10): x decreases overall.
+    REQUIRE(pts.front().x() > pts.back().x());
+    REQUIRE(pts.front().y() < pts.back().y());
+
+    // Through-point (the middle arc point) should have positive x and y.
+    const Vec2d& mid = pts[pts.size() / 2];
+    REQUIRE(mid.x() > 0.0);
+    REQUIRE(mid.y() > 0.0);
+}
+
+TEST_CASE("DrawPathSampling: CW arc has CW point order", "[DrawPathSampling]")
+{
+    // Arc from (0,10) through (7.071,7.071) to (10,0): CW — x increases, y decreases.
+    constexpr double R = 10.0;
+    const double cos45 = std::cos(M_PI / 4.0);
+    const DrawSegment seg = DrawSegment::make_arc(
+        Vec2d(0.0, R), Vec2d(R * cos45, R * cos45), Vec2d(R, 0.0));
+
+    const std::vector<Vec2d> pts = draw_sample_segment(seg, 0.05);
+    REQUIRE(pts.size() >= 2);
+    REQUIRE_THAT(pts.front().x(), WithinAbs(0.0, 1e-10));
+    REQUIRE_THAT(pts.front().y(), WithinAbs(R,   1e-10));
+    REQUIRE_THAT(pts.back().x(),  WithinAbs(R,   1e-10));
+    REQUIRE_THAT(pts.back().y(),  WithinAbs(0.0, 1e-10));
+    // x should increase going from start to end.
+    REQUIRE(pts.back().x() > pts.front().x());
+}
+
+TEST_CASE("DrawPathSampling: bezier returns first==start, last==end, intermediates finite", "[DrawPathSampling]")
+{
+    const DrawSegment seg = DrawSegment::make_bezier(
+        Vec2d(0.0, 0.0), Vec2d(3.0, 8.0), Vec2d(7.0, 8.0), Vec2d(10.0, 0.0));
+
+    const std::vector<Vec2d> pts = draw_sample_segment(seg, 0.05);
+    REQUIRE(pts.size() >= 2);
+    REQUIRE_THAT(pts.front().x(), WithinAbs(0.0,  1e-10));
+    REQUIRE_THAT(pts.front().y(), WithinAbs(0.0,  1e-10));
+    REQUIRE_THAT(pts.back().x(),  WithinAbs(10.0, 1e-10));
+    REQUIRE_THAT(pts.back().y(),  WithinAbs(0.0,  1e-10));
+
+    for (const Vec2d& p : pts) {
+        REQUIRE(std::isfinite(p.x()));
+        REQUIRE(std::isfinite(p.y()));
+    }
+}
+
+TEST_CASE("DrawPathSampling: tighter tolerance produces >= points as looser", "[DrawPathSampling]")
+{
+    const DrawSegment seg = DrawSegment::make_arc(
+        Vec2d(10.0, 0.0), Vec2d(0.0, 10.0), Vec2d(-10.0, 0.0)); // semicircle
+
+    const auto pts_tight = draw_sample_segment(seg, 0.005);
+    const auto pts_loose = draw_sample_segment(seg, 0.5);
+    REQUIRE(pts_tight.size() >= pts_loose.size());
+}
+
+TEST_CASE("DrawPathSampling: degenerate arc (collinear) returns {start, end} without crash", "[DrawPathSampling]")
+{
+    // All three points on a horizontal line → collinear → degenerate.
+    const DrawSegment seg = DrawSegment::make_arc(Vec2d(0, 0), Vec2d(5, 0), Vec2d(10, 0));
+    const std::vector<Vec2d> pts = draw_sample_segment(seg);
+    REQUIRE(pts.size() == 2);
+    REQUIRE_THAT(pts.front().x(), WithinAbs(0.0,  1e-10));
+    REQUIRE_THAT(pts.back().x(),  WithinAbs(10.0, 1e-10));
+
+    // Same point (fully degenerate).
+    const DrawSegment seg2 = DrawSegment::make_arc(Vec2d(3, 3), Vec2d(3, 3), Vec2d(3, 3));
+    REQUIRE_NOTHROW(draw_sample_segment(seg2));
+}
+
+TEST_CASE("DrawPathSampling: sampled length for line equals chord length", "[DrawPathSampling]")
+{
+    const DrawSegment seg = DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(3.0, 4.0));
+    REQUIRE_THAT(draw_segment_sampled_length(seg), WithinAbs(5.0, 1e-9));
+}
+
+TEST_CASE("DrawPathSampling: sampled length for 90-degree arc of R=10 is close to PI*10/2", "[DrawPathSampling]")
+{
+    constexpr double R        = 10.0;
+    constexpr double expected = M_PI * R / 2.0; // 90° arc length
+    const double cos45 = std::cos(M_PI / 4.0);
+    const DrawSegment seg = DrawSegment::make_arc(
+        Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R));
+
+    const double length = draw_segment_sampled_length(seg, 0.001);
+    REQUIRE_THAT(length, WithinAbs(expected, expected * 0.01)); // within 1%
+}
+
+// ---------------------------------------------------------------------------
+// TASK-004: translate_segment and draw_display_length_mm for arc/bezier
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DrawModeFeedback: translate_segment moves all points for Line", "[DrawModeFeedback]")
+{
+    const DrawSegment seg = DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(5.0, 0.0));
+    const Vec2d delta(3.0, -1.0);
+    const DrawSegment t = draw_translate_segment(seg, delta);
+    REQUIRE_THAT(t.start.x(), WithinAbs(3.0, 1e-12));
+    REQUIRE_THAT(t.start.y(), WithinAbs(-1.0, 1e-12));
+    REQUIRE_THAT(t.end.x(),   WithinAbs(8.0, 1e-12));
+    REQUIRE_THAT(t.end.y(),   WithinAbs(-1.0, 1e-12));
+}
+
+TEST_CASE("DrawModeFeedback: translate_segment moves start/ctrl1/end for CircularArc", "[DrawModeFeedback]")
+{
+    const DrawSegment seg = DrawSegment::make_arc(Vec2d(10.0, 0.0), Vec2d(7.07, 7.07), Vec2d(0.0, 10.0));
+    const Vec2d delta(2.0, 1.0);
+    const DrawSegment t = draw_translate_segment(seg, delta);
+
+    REQUIRE(t.type == DrawSegmentType::CircularArc);
+    REQUIRE_THAT(t.start.x(),  WithinAbs(12.0,  1e-9));
+    REQUIRE_THAT(t.start.y(),  WithinAbs(1.0,   1e-9));
+    REQUIRE_THAT(t.ctrl1.x(), WithinAbs(9.07,  1e-9));
+    REQUIRE_THAT(t.ctrl1.y(), WithinAbs(8.07,  1e-9));
+    REQUIRE_THAT(t.end.x(),   WithinAbs(2.0,   1e-9));
+    REQUIRE_THAT(t.end.y(),   WithinAbs(11.0,  1e-9));
+}
+
+TEST_CASE("DrawModeFeedback: translate_segment moves start/ctrl1/ctrl2/end for CubicBezier", "[DrawModeFeedback]")
+{
+    const DrawSegment seg = DrawSegment::make_bezier(
+        Vec2d(0.0, 0.0), Vec2d(3.0, 8.0), Vec2d(7.0, 8.0), Vec2d(10.0, 0.0));
+    const Vec2d delta(-1.0, 2.0);
+    const DrawSegment t = draw_translate_segment(seg, delta);
+
+    REQUIRE(t.type == DrawSegmentType::CubicBezier);
+    REQUIRE_THAT(t.start.x(), WithinAbs(-1.0, 1e-12));
+    REQUIRE_THAT(t.start.y(), WithinAbs(2.0,  1e-12));
+    REQUIRE_THAT(t.ctrl1.x(), WithinAbs(2.0,  1e-12));
+    REQUIRE_THAT(t.ctrl1.y(), WithinAbs(10.0, 1e-12));
+    REQUIRE_THAT(t.ctrl2.x(), WithinAbs(6.0,  1e-12));
+    REQUIRE_THAT(t.ctrl2.y(), WithinAbs(10.0, 1e-12));
+    REQUIRE_THAT(t.end.x(),   WithinAbs(9.0,  1e-12));
+    REQUIRE_THAT(t.end.y(),   WithinAbs(2.0,  1e-12));
+}
+
+TEST_CASE("DrawModeFeedback: draw_display_length_mm for line matches chord norm", "[DrawModeFeedback]")
+{
+    const DrawSegment seg = DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(3.0, 4.0));
+    REQUIRE_THAT(draw_display_length_mm(seg), WithinAbs(5.0, 1e-9));
+}
+
+TEST_CASE("DrawModeFeedback: draw_display_length_mm for 90-degree arc of R=10 is close to PI*5", "[DrawModeFeedback]")
+{
+    constexpr double R        = 10.0;
+    constexpr double expected = M_PI * R / 2.0;
+    const double cos45 = std::cos(M_PI / 4.0);
+    const DrawSegment seg = DrawSegment::make_arc(
+        Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R));
+    const double len = draw_display_length_mm(seg);
+    REQUIRE_THAT(len, WithinAbs(expected, expected * 0.01));
 }
