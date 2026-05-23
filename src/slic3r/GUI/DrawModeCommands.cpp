@@ -1,4 +1,5 @@
 #include "DrawModeCommands.hpp"
+#include "libslic3r/DrawModeFeedback.hpp"
 #include <cassert>
 #include <stdexcept>
 
@@ -87,15 +88,31 @@ void MoveEndpointCommand::undo(DrawSession& session)
 void TranslateSegmentCommand::execute(DrawSession& session)
 {
     DrawSegment& seg = get_segment(session, layer_index, segment_index);
-    seg.start += delta;
-    seg.end   += delta;
+    seg = draw_translate_segment(seg, delta);
 }
 
 void TranslateSegmentCommand::undo(DrawSession& session)
 {
     DrawSegment& seg = get_segment(session, layer_index, segment_index);
-    seg.start -= delta;
-    seg.end   -= delta;
+    seg = draw_translate_segment(seg, -delta);
+}
+
+// ---------------------------------------------------------------------------
+// MoveControlHandleCommand
+// ---------------------------------------------------------------------------
+
+void MoveControlHandleCommand::execute(DrawSession& session)
+{
+    DrawSegment& seg = get_segment(session, layer_index, segment_index);
+    if (ctrl_idx == 0) seg.ctrl1 = new_pos;
+    else               seg.ctrl2 = new_pos;
+}
+
+void MoveControlHandleCommand::undo(DrawSession& session)
+{
+    DrawSegment& seg = get_segment(session, layer_index, segment_index);
+    if (ctrl_idx == 0) seg.ctrl1 = old_pos;
+    else               seg.ctrl2 = old_pos;
 }
 
 // ---------------------------------------------------------------------------

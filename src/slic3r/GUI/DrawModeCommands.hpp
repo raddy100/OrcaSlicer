@@ -59,6 +59,7 @@ struct MoveEndpointCommand : DrawCommand {
 
 // Translate a whole committed segment by a plate-space delta. Used by Edit Mode
 // arrow-key nudging so both endpoints move through one undoable command entry.
+// Uses draw_translate_segment() so ctrl1/ctrl2 are also moved for arc/bezier.
 struct TranslateSegmentCommand : DrawCommand {
     int   layer_index;
     int   segment_index;
@@ -66,6 +67,23 @@ struct TranslateSegmentCommand : DrawCommand {
 
     TranslateSegmentCommand(int layer_idx, int seg_idx, Vec2d delta_)
         : layer_index(layer_idx), segment_index(seg_idx), delta(delta_) {}
+
+    void execute(DrawSession& session) override;
+    void undo(DrawSession& session) override;
+};
+
+// Move one control handle of an arc or bezier segment.
+// ctrl_idx: 0 = ctrl1 (arc through-point or bezier ctrl1), 1 = ctrl2 (bezier only)
+struct MoveControlHandleCommand : DrawCommand {
+    int   layer_index;
+    int   segment_index;
+    int   ctrl_idx;  // 0 = ctrl1, 1 = ctrl2
+    Vec2d old_pos;
+    Vec2d new_pos;
+
+    MoveControlHandleCommand(int layer_idx, int seg_idx, int ctrl, Vec2d old_p, Vec2d new_p)
+        : layer_index(layer_idx), segment_index(seg_idx), ctrl_idx(ctrl),
+          old_pos(old_p), new_pos(new_p) {}
 
     void execute(DrawSession& session) override;
     void undo(DrawSession& session) override;
