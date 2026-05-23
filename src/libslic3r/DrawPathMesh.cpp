@@ -1,6 +1,7 @@
 #include "DrawPathMesh.hpp"
 
 #include "ClipperUtils.hpp"
+#include "DrawModeFeedback.hpp"
 #include "Polyline.hpp"
 #include "Tesselate.hpp"
 
@@ -37,15 +38,17 @@ std::vector<DrawPolyline> collect_extrusion_polylines(const DrawLayer& layer)
             continue;
         }
 
+        const std::vector<Vec2d> sampled = draw_sample_segment(seg);
+
         if (current.empty()) {
-            current.push_back(seg.start);
-            current.push_back(seg.end);
-        } else if (same_point(current.back(), seg.start)) {
-            current.push_back(seg.end);
+            // Start a new chain with all sampled points.
+            current.insert(current.end(), sampled.begin(), sampled.end());
+        } else if (same_point(current.back(), sampled.front())) {
+            // Segments are connected: skip the duplicate start point.
+            current.insert(current.end(), sampled.begin() + 1, sampled.end());
         } else {
             push_path_if_valid(paths, current);
-            current.push_back(seg.start);
-            current.push_back(seg.end);
+            current.insert(current.end(), sampled.begin(), sampled.end());
         }
     }
 

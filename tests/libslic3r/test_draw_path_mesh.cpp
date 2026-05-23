@@ -1,7 +1,10 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/DrawPathMesh.hpp"
+#include "libslic3r/DrawModeFeedback.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+
+#include <cmath>
 
 using namespace Slic3r;
 
@@ -78,5 +81,95 @@ TEST_CASE("DrawPathMesh: travel breaks remain separate material islands", "[Draw
 
     REQUIRE_FALSE(mesh.empty());
     REQUIRE(its_number_of_patches(mesh.its) == 2);
+}
+
+// ---------------------------------------------------------------------------
+// TASK-006: Arc / Bezier mesh rendering tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DrawPathMesh: quarter-circle arc produces non-empty single-patch mesh", "[DrawPathMesh]")
+{
+    constexpr double R     = 10.0;
+    const double    cos45  = std::cos(M_PI / 4.0);
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R)));
+
+    TriangleMesh mesh = make_draw_path_mesh(session, 0.4);
+
+    REQUIRE_FALSE(mesh.empty());
+    REQUIRE(its_number_of_patches(mesh.its) == 1);
+}
+
+TEST_CASE("DrawPathMesh: line + arc connected produces single-patch mesh", "[DrawPathMesh]")
+{
+    constexpr double R    = 10.0;
+    const double    cos45 = std::cos(M_PI / 4.0);
+    DrawSession session;
+    session.add_layer(0.2);
+    // Line ends where the arc begins.
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(R, 0.0)));
+    session.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R)));
+
+    TriangleMesh mesh = make_draw_path_mesh(session, 0.4);
+
+    REQUIRE_FALSE(mesh.empty());
+    REQUIRE(its_number_of_patches(mesh.its) == 1);
+}
+
+TEST_CASE("DrawPathMesh: travel break between two arcs produces >= 2 patches", "[DrawPathMesh]")
+{
+    constexpr double R    = 5.0;
+    const double    cos45 = std::cos(M_PI / 4.0);
+    DrawSession session;
+    session.add_layer(0.2);
+    // Arc 1 (extruded)
+    session.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R)));
+    // Travel
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0.0, R), Vec2d(20.0, 0.0), /*travel=*/true));
+    // Arc 2 (extruded)
+    session.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(20.0, 0.0), Vec2d(20.0 + R * cos45, R * cos45), Vec2d(20.0 + R, 0.0)));
+
+    TriangleMesh mesh = make_draw_path_mesh(session, 0.4);
+
+    REQUIRE_FALSE(mesh.empty());
+    REQUIRE(its_number_of_patches(mesh.its) >= 2);
+}
+
+TEST_CASE("DrawPathMesh: cubic bezier segment produces non-empty mesh", "[DrawPathMesh]")
+{
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(
+        DrawSegment::make_bezier(Vec2d(0.0, 0.0), Vec2d(3.0, 8.0), Vec2d(7.0, 8.0), Vec2d(10.0, 0.0)));
+
+    TriangleMesh mesh = make_draw_path_mesh(session, 0.4);
+
+    REQUIRE_FALSE(mesh.empty());
+    REQUIRE(its_number_of_patches(mesh.its) == 1);
+}
+
+TEST_CASE("DrawPathMesh: semicircle arc bbox extends beyond chord in Y", "[DrawPathMesh]")
+{
+    // Semicircle: centre (0,0), R=5; from (-5,0) through (0,5) to (5,0).
+    // The chord is along Y=0; the arc bulges to Y=5 (+ nozzle half-width).
+    constexpr double R    = 5.0;
+    constexpr double nozzle = 0.4;
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(
+        DrawSegment::make_arc(Vec2d(-R, 0.0), Vec2d(0.0, R), Vec2d(R, 0.0)));
+
+    TriangleMesh mesh = make_draw_path_mesh(session, nozzle);
+
+    REQUIRE_FALSE(mesh.empty());
+    const BoundingBoxf3 bb = mesh.bounding_box();
+    // Max Y should be at least R (the arc tip), because the arc samples form a tube that
+    // includes the tip point at (0, R=5).  With nozzle half-width it should be ≥ R.
+    REQUIRE(bb.max.y() >= R - 1e-3);
 }
 
