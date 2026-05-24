@@ -994,3 +994,91 @@ TEST_CASE("Draw3mf: round-trip mixed session - line + arc + bezier all preserved
     REQUIRE(dst.layers[0].segments[1].type == DrawSegmentType::CircularArc);
     REQUIRE(dst.layers[0].segments[2].type == DrawSegmentType::CubicBezier);
 }
+
+// ---------------------------------------------------------------------------
+// Layer copy/paste via PasteSegmentsCommand
+// ---------------------------------------------------------------------------
+
+#include "slic3r/GUI/DrawModeCommands.hpp"
+
+TEST_CASE("PasteSegmentsCommand — paste to empty layer", "[DrawLayerCopyPaste]")
+{
+    DrawSession session;
+    session.add_layer(0.2);
+    session.active_layer = 0;
+
+    std::vector<DrawSegment> to_paste = {
+        DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(1.0, 0.0)),
+        DrawSegment::make_line(Vec2d(1.0, 0.0), Vec2d(1.0, 1.0)),
+    };
+
+    Slic3r::GUI::PasteSegmentsCommand cmd(0, to_paste);
+    cmd.execute(session);
+
+    REQUIRE(session.layers[0].segments.size() == 2);
+    REQUIRE(session.layers[0].segments[0].end.x() == Catch::Approx(1.0));
+}
+
+TEST_CASE("PasteSegmentsCommand — paste is additive", "[DrawLayerCopyPaste]")
+{
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(5.0, 0.0)));
+
+    std::vector<DrawSegment> to_paste = {
+        DrawSegment::make_line(Vec2d(0.0, 1.0), Vec2d(3.0, 1.0)),
+    };
+
+    Slic3r::GUI::PasteSegmentsCommand cmd(0, to_paste);
+    cmd.execute(session);
+
+    REQUIRE(session.layers[0].segments.size() == 2);
+    // Original segment is still first
+    REQUIRE(session.layers[0].segments[0].end.x() == Catch::Approx(5.0));
+    // Pasted segment is appended
+    REQUIRE(session.layers[0].segments[1].end.x() == Catch::Approx(3.0));
+}
+
+TEST_CASE("PasteSegmentsCommand — undo removes exactly pasted segments", "[DrawLayerCopyPaste]")
+{
+    DrawSession session;
+    session.add_layer(0.2);
+    // Pre-existing segment
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(5.0, 0.0)));
+
+    std::vector<DrawSegment> to_paste = {
+        DrawSegment::make_line(Vec2d(0.0, 1.0), Vec2d(3.0, 1.0)),
+        DrawSegment::make_line(Vec2d(3.0, 1.0), Vec2d(6.0, 1.0)),
+    };
+
+    Slic3r::GUI::PasteSegmentsCommand cmd(0, to_paste);
+    cmd.execute(session);
+    REQUIRE(session.layers[0].segments.size() == 3);
+
+    cmd.undo(session);
+    REQUIRE(session.layers[0].segments.size() == 1);
+    // Original segment is restored
+    REQUIRE(session.layers[0].segments[0].end.x() == Catch::Approx(5.0));
+}
+
+TEST_CASE("PasteSegmentsCommand — copy from previous layer pattern", "[DrawLayerCopyPaste]")
+{
+    DrawSession session;
+    session.add_layer(0.2); // layer 0
+    session.add_layer(0.2); // layer 1
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(4.0, 0.0)));
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(4.0, 0.0), Vec2d(4.0, 4.0)));
+    session.active_layer = 1;
+
+    // Simulate "Copy From Prev": paste layer 0 segments into layer 1
+    std::vector<DrawSegment> prev_segs = session.layers[0].segments;
+    Slic3r::GUI::PasteSegmentsCommand cmd(1, prev_segs);
+    cmd.execute(session);
+
+    REQUIRE(session.layers[0].segments.size() == 2); // unchanged
+    REQUIRE(session.layers[1].segments.size() == 2); // got the copy
+
+    cmd.undo(session);
+    REQUIRE(session.layers[1].segments.empty()); // reverted
+    REQUIRE(session.layers[0].segments.size() == 2); // still unchanged
+}
