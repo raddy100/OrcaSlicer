@@ -151,6 +151,8 @@ private:
     int                  m_sel_layer_idx { -1 };
     int                  m_sel_seg_idx   { -1 };
     std::optional<EndpointRef>  m_dragging_ep;
+    // Connected endpoints that move together with m_dragging_ep (populated on drag start).
+    std::vector<ConnectedEndpointRef> m_dragging_connected_eps;
 
     // Reference to a control handle being dragged in edit mode
     struct ControlHandleRef {

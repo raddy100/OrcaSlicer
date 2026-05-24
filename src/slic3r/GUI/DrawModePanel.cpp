@@ -27,6 +27,26 @@
 namespace Slic3r {
 namespace GUI {
 
+// Find all endpoints in the layer that are at the same position as the primary endpoint.
+// Returns a list including the primary endpoint itself.
+static std::vector<ConnectedEndpointRef> find_connected_endpoints(
+    const DrawLayer& layer, int primary_seg, bool primary_is_start)
+{
+    constexpr double CONN_TOL = 1e-4; // mm — much smaller than any snap grid
+    const Vec2d pos = primary_is_start ? layer.segments[primary_seg].start
+                                       : layer.segments[primary_seg].end;
+    std::vector<ConnectedEndpointRef> result;
+    result.push_back({primary_seg, primary_is_start});
+    for (int si = 0; si < (int)layer.segments.size(); ++si) {
+        if (si == primary_seg) continue;
+        if ((layer.segments[si].start - pos).norm() < CONN_TOL)
+            result.push_back({si, true});
+        if ((layer.segments[si].end - pos).norm() < CONN_TOL)
+            result.push_back({si, false});
+    }
+    return result;
+}
+
 DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL)
     , m_plater(plater)
@@ -186,6 +206,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
         m_is_dragging = false;
         m_dragging_ep.reset();
         m_dragging_ctrl.reset();
+        m_dragging_connected_eps.clear();
         m_pan_start.reset();
         m_canvas->SetCursor(wxCursor(wxCURSOR_CROSS));
         if (m_canvas) m_canvas->Refresh(false);
@@ -236,6 +257,7 @@ void DrawModePanel::activate(PartPlate* plate)
     m_sel_seg_idx   = -1;
     m_dragging_ep.reset();
     m_dragging_ctrl.reset();
+    m_dragging_connected_eps.clear();
     m_is_dragging   = false;
 
     // Reset tool selection
@@ -1108,6 +1130,19 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
         dc.SetPen(wxPen(wxColour(255, 255, 0), 2));
         dc.SetBrush(*wxTRANSPARENT_BRUSH);
         dc.DrawCircle(pd_ep, 5);
+
+        // Also preview all connected segments (their shared endpoint moves with the drag).
+        int li = m_dragging_ep->layer_index;
+        for (const auto& conn : m_dragging_connected_eps) {
+            if (conn.segment_index == m_dragging_ep->segment_index &&
+                    conn.is_start == m_dragging_ep->is_start) continue; // skip primary
+            if (conn.segment_index < 0 ||
+                    conn.segment_index >= (int)m_session.layers[li].segments.size()) continue;
+            const DrawSegment& cseg = m_session.layers[li].segments[conn.segment_index];
+            Vec2d cfixed = conn.is_start ? cseg.end : cseg.start;
+            dc.SetPen(wxPen(wxColour(255, 200, 0), 2, wxPENSTYLE_SHORT_DASH));
+            dc.DrawLine(plate_to_screen(m_drag_preview), plate_to_screen(cfixed));
+        }
     }
 
     if (m_show_measurements && m_input_mode == DrawInputMode::Editing
@@ -1174,6 +1209,7 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
             m_drag_preview  = ctrl_pos;
             m_is_dragging   = true;
             m_dragging_ep.reset();
+            m_dragging_connected_eps.clear();
             m_pending_start.reset();
             reset_draft(true);
             m_sel_layer_idx = active;
@@ -1194,6 +1230,7 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
         if (ep_seg >= 0) {
             Vec2d ep = ep_is_start ? layer.segments[ep_seg].start
                                    : layer.segments[ep_seg].end;
+            m_dragging_connected_eps = find_connected_endpoints(layer, ep_seg, ep_is_start);
             m_dragging_ep   = EndpointRef{active, ep_seg, ep_is_start};
             m_drag_preview  = ep;
             m_is_dragging   = true;
@@ -1229,6 +1266,7 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
         m_sel_layer_idx = (body_seg >= 0) ? active : -1;
         m_sel_seg_idx   = body_seg;
         m_dragging_ep.reset();
+        m_dragging_connected_eps.clear();
         m_dragging_ctrl.reset();
         m_is_dragging = false;
         m_canvas->Refresh(false);
@@ -1298,6 +1336,7 @@ void DrawModePanel::on_canvas_right_down(wxMouseEvent&)
         m_is_dragging = false;
         m_dragging_ep.reset();
         m_dragging_ctrl.reset();
+        m_dragging_connected_eps.clear();
     }
     if (m_canvas) m_canvas->Refresh(false);
 }
@@ -1337,10 +1376,14 @@ void DrawModePanel::on_canvas_left_up(wxMouseEvent& evt)
         Vec2d new_pos = m_drag_preview;
         // Only commit if actually moved
         if ((new_pos - old_pos).squaredNorm() > 1e-12) {
-            dispatch_command(std::make_unique<MoveEndpointCommand>(
-                ep.layer_index, ep.segment_index, ep.is_start, old_pos, new_pos));
+            // Use connected-endpoints command to move all segments sharing this node.
+            std::vector<ConnectedEndpointRef> eps = m_dragging_connected_eps;
+            if (eps.empty()) eps.push_back({ep.segment_index, ep.is_start});
+            dispatch_command(std::make_unique<MoveConnectedEndpointsCommand>(
+                ep.layer_index, std::move(eps), old_pos, new_pos));
         }
     }
+    m_dragging_connected_eps.clear();
     m_dragging_ep.reset();
     m_is_dragging = false;
     if (m_canvas) m_canvas->Refresh(false);
@@ -1439,6 +1482,7 @@ void DrawModePanel::on_draw_toggle(wxCommandEvent&)
     m_sel_seg_idx   = -1;
     m_dragging_ep.reset();
     m_dragging_ctrl.reset();
+    m_dragging_connected_eps.clear();
     m_is_dragging   = false;
     reset_draft(false);
     // Re-assert the current tool button state

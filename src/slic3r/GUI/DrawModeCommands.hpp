@@ -125,6 +125,50 @@ struct ClearLayerCommand : DrawCommand {
     void undo(DrawSession& session) override;
 };
 
+// Reference to one endpoint in a layer (no layer_index — all in same layer).
+struct ConnectedEndpointRef {
+    int  segment_index;
+    bool is_start; // true = start endpoint, false = end endpoint
+};
+
+// Move multiple endpoints that share the same position to a new position.
+// Used when dragging a shared node in Edit Mode: all connected segment endpoints
+// move atomically (single undo step).
+struct MoveConnectedEndpointsCommand : DrawCommand {
+    int layer_index;
+    std::vector<ConnectedEndpointRef> endpoints; // includes the primary + all connected
+    Vec2d old_pos;
+    Vec2d new_pos;
+
+    MoveConnectedEndpointsCommand(int layer_idx,
+                                  std::vector<ConnectedEndpointRef> eps,
+                                  Vec2d old_p, Vec2d new_p)
+        : layer_index(layer_idx), endpoints(std::move(eps)),
+          old_pos(old_p), new_pos(new_p) {}
+
+    void execute(DrawSession& session) override {
+        assert(layer_index >= 0 && layer_index < session.layer_count());
+        DrawLayer& layer = session.layers[layer_index];
+        for (const auto& ep : endpoints) {
+            assert(ep.segment_index >= 0 && ep.segment_index < (int)layer.segments.size());
+            DrawSegment& seg = layer.segments[ep.segment_index];
+            if (ep.is_start) seg.start = new_pos;
+            else             seg.end   = new_pos;
+        }
+    }
+
+    void undo(DrawSession& session) override {
+        assert(layer_index >= 0 && layer_index < session.layer_count());
+        DrawLayer& layer = session.layers[layer_index];
+        for (const auto& ep : endpoints) {
+            assert(ep.segment_index >= 0 && ep.segment_index < (int)layer.segments.size());
+            DrawSegment& seg = layer.segments[ep.segment_index];
+            if (ep.is_start) seg.start = old_pos;
+            else             seg.end   = old_pos;
+        }
+    }
+};
+
 // Append a set of copied segments to a layer.
 // Paste is always additive: existing segments on the target layer are preserved.
 // Undo removes exactly the appended segments (the last segments.size() entries).
