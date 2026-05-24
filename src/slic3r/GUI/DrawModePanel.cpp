@@ -46,6 +46,15 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_remove_layer_btn->SetToolTip("Go down a layer.\nIf the current layer is empty it will be deleted.");
     m_delete_layer_btn->SetToolTip("Delete the current layer and all its segments.");
 
+    m_copy_layer_btn  = new wxButton(this, wxID_ANY, "Copy Layer");
+    m_paste_layer_btn = new wxButton(this, wxID_ANY, "Paste Layer");
+    m_copy_prev_btn   = new wxButton(this, wxID_ANY, "Copy From Prev");
+    m_copy_layer_btn->SetToolTip("Copy all segments from the current layer to the clipboard.");
+    m_paste_layer_btn->SetToolTip("Paste the clipboard segments into the current layer (additive — does not remove existing segments).");
+    m_copy_prev_btn->SetToolTip("Add all segments from the previous layer to the current layer (additive, single undo step).");
+    m_paste_layer_btn->Disable(); // no clipboard yet
+    m_copy_prev_btn->Disable();   // no previous layer yet
+
     // Mode toggles
     m_draw_toggle = new wxToggleButton(this, wxID_ANY, "Draw");
     m_edit_toggle = new wxToggleButton(this, wxID_ANY, "Edit");
@@ -123,6 +132,9 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     nav_sizer->Add(m_remove_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     nav_sizer->Add(m_add_layer_btn,    0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     nav_sizer->Add(m_delete_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    nav_sizer->Add(m_copy_layer_btn,  0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    nav_sizer->Add(m_paste_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    nav_sizer->Add(m_copy_prev_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
 
     auto* main_sizer = new wxBoxSizer(wxVERTICAL);
     main_sizer->Add(top_sizer, 0, wxEXPAND);
@@ -151,6 +163,9 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_remove_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_remove_layer, this);
     m_delete_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_delete_layer, this);
     m_clear_btn->Bind(wxEVT_BUTTON,      &DrawModePanel::on_clear_layer, this);
+    m_copy_layer_btn->Bind(wxEVT_BUTTON,  &DrawModePanel::on_copy_layer,     this);
+    m_paste_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_paste_layer,    this);
+    m_copy_prev_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_copy_from_prev, this);
     m_simulate_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_simulate,    this);
     m_finalize_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_finalize,    this);
     Bind(wxEVT_CHAR_HOOK,                &DrawModePanel::on_char_hook,   this);
@@ -232,6 +247,8 @@ void DrawModePanel::activate(PartPlate* plate)
     if (restore_existing_draw_object(plate))
         return;
 
+    m_layer_clipboard.reset();
+    update_copy_paste_buttons();
     update_banner();
     update_layer_label();
     if (m_canvas) m_canvas->Refresh();
@@ -306,6 +323,7 @@ void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
 void DrawModePanel::refresh()
 {
     update_layer_label();
+    update_copy_paste_buttons();
     if (m_canvas) m_canvas->Refresh(false);
 }
 
@@ -1519,6 +1537,62 @@ void DrawModePanel::on_clear_layer(wxCommandEvent&)
     if (active < 0 || active >= m_session.layer_count()) return;
     dispatch_command(std::make_unique<ClearLayerCommand>(active));
     reset_draft(false);
+}
+
+// ---------------------------------------------------------------------------
+// Copy / Paste layer handlers
+// ---------------------------------------------------------------------------
+
+void DrawModePanel::update_copy_paste_buttons()
+{
+    const int active = m_session.active_layer;
+
+    // Paste: enabled when clipboard has segments
+    const bool has_clipboard = m_layer_clipboard.has_value() && !m_layer_clipboard->empty();
+    if (m_paste_layer_btn) m_paste_layer_btn->Enable(has_clipboard);
+
+    // Copy From Prev: enabled when there is a previous layer with segments
+    bool has_prev = false;
+    if (active > 0 && active < m_session.layer_count())
+        has_prev = !m_session.layers[active - 1].segments.empty();
+    if (m_copy_prev_btn) m_copy_prev_btn->Enable(has_prev);
+}
+
+void DrawModePanel::on_copy_layer(wxCommandEvent&)
+{
+    const int active = m_session.active_layer;
+    if (active < 0 || active >= m_session.layer_count()) return;
+    const std::vector<DrawSegment>& segs = m_session.layers[active].segments;
+    if (segs.empty()) {
+        wxMessageBox("The current layer has no segments to copy.", "Draw Mode",
+            wxOK | wxICON_INFORMATION, this);
+        return;
+    }
+    m_layer_clipboard = segs; // copy
+    update_copy_paste_buttons();
+}
+
+void DrawModePanel::on_paste_layer(wxCommandEvent&)
+{
+    if (!m_layer_clipboard.has_value() || m_layer_clipboard->empty()) return;
+    const int active = m_session.active_layer;
+    if (active < 0 || active >= m_session.layer_count()) return;
+    dispatch_command(std::make_unique<PasteSegmentsCommand>(active, *m_layer_clipboard));
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_copy_from_prev(wxCommandEvent&)
+{
+    const int active = m_session.active_layer;
+    if (active <= 0 || active >= m_session.layer_count()) return;
+    const std::vector<DrawSegment>& prev_segs = m_session.layers[active - 1].segments;
+    if (prev_segs.empty()) {
+        wxMessageBox("The previous layer has no segments to copy.", "Draw Mode",
+            wxOK | wxICON_INFORMATION, this);
+        return;
+    }
+    dispatch_command(std::make_unique<PasteSegmentsCommand>(active, prev_segs));
+    if (m_canvas) m_canvas->Refresh(false);
 }
 
 bool DrawModePanel::apply_session_to_model(bool reset_after)

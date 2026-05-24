@@ -80,6 +80,9 @@ private:
     wxButton*          m_remove_layer_btn { nullptr }; // go down / delete if empty
     wxButton*          m_add_layer_btn  { nullptr };
     wxButton*          m_delete_layer_btn { nullptr }; // always delete current layer
+    wxButton*          m_copy_layer_btn   { nullptr }; // copy current layer to clipboard
+    wxButton*          m_paste_layer_btn  { nullptr }; // paste clipboard into current layer
+    wxButton*          m_copy_prev_btn    { nullptr }; // copy-from-previous-layer shortcut
     wxButton*          m_clear_btn      { nullptr };
     wxButton*          m_simulate_btn   { nullptr };
     wxButton*          m_finalize_btn   { nullptr };
@@ -95,6 +98,10 @@ private:
     DrawInputMode m_input_mode   { DrawInputMode::Drawing };
     int          m_editing_obj_idx{ -1 }; // >=0 when editing existing object
     DrawTool     m_draw_tool     { DrawTool::Line }; // active drawing tool
+
+    // Layer clipboard: holds segments copied via "Copy Layer".
+    // Cleared on activate(). Persists across layer navigation and undo/redo.
+    std::optional<std::vector<DrawSegment>> m_layer_clipboard;
 
     // Plate origin snapshot (plate-relative, set during activate())
     double       m_plate_x { 0.0 };
@@ -220,12 +227,16 @@ private:
     // Sync the chain anchor (m_pending_start) to the last segment endpoint
     // after undo/redo, so the rubber-band previews the correct continuation.
     void sync_chain_anchor();
+    void update_copy_paste_buttons(); // enable/disable copy/paste buttons based on current state
     void on_prev_layer(wxCommandEvent& evt);
     void on_next_layer(wxCommandEvent& evt);
     void on_add_layer(wxCommandEvent& evt);
     void on_remove_layer(wxCommandEvent& evt);
     void on_delete_layer(wxCommandEvent& evt);
     void on_clear_layer(wxCommandEvent& evt);
+    void on_copy_layer(wxCommandEvent& evt);
+    void on_paste_layer(wxCommandEvent& evt);
+    void on_copy_from_prev(wxCommandEvent& evt);
     void on_simulate(wxCommandEvent& evt);
     void on_finalize(wxCommandEvent& evt);
 
