@@ -1082,3 +1082,180 @@ TEST_CASE("PasteSegmentsCommand — copy from previous layer pattern", "[DrawLay
     REQUIRE(session.layers[1].segments.empty()); // reverted
     REQUIRE(session.layers[0].segments.size() == 2); // still unchanged
 }
+
+// ---------------------------------------------------------------------------
+// MoveConnectedEndpointsCommand — Connected Node Drag
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MoveConnectedEndpointsCommand — single endpoint (no connections)", "[ConnectedNodeDrag]")
+{
+    // Session: 1 layer, 1 segment A = (0,0) -> (5,0)
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(5.0, 0.0)));
+
+    // Command: move A.start from (0,0) to (2,0)
+    std::vector<Slic3r::GUI::ConnectedEndpointRef> eps;
+    eps.push_back({0, true}); // seg 0, is_start=true
+    Slic3r::GUI::MoveConnectedEndpointsCommand cmd(
+        0, std::move(eps), Vec2d(0.0, 0.0), Vec2d(2.0, 0.0));
+
+    cmd.execute(session);
+
+    REQUIRE_THAT(session.layers[0].segments[0].start.x(), WithinAbs(2.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].start.y(), WithinAbs(0.0, 1e-9));
+    // End unchanged
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(), WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].end.y(), WithinAbs(0.0, 1e-9));
+
+    cmd.undo(session);
+
+    REQUIRE_THAT(session.layers[0].segments[0].start.x(), WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].start.y(), WithinAbs(0.0, 1e-9));
+    // End still unchanged after undo
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(), WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].end.y(), WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("MoveConnectedEndpointsCommand — T-junction: two segments share an endpoint", "[ConnectedNodeDrag]")
+{
+    // Session: 1 layer, 2 segments:
+    //   A = (0,0) -> (5,0)   [seg 0]
+    //   B = (5,0) -> (5,5)   [seg 1]
+    // Shared node at (5,0): A.end and B.start
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(5.0, 0.0)));
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(5.0, 0.0), Vec2d(5.0, 5.0)));
+
+    // Command: move (5,0) -> (6,0) for both A.end and B.start
+    std::vector<Slic3r::GUI::ConnectedEndpointRef> eps;
+    eps.push_back({0, false}); // seg 0, is_start=false  (A.end)
+    eps.push_back({1, true});  // seg 1, is_start=true   (B.start)
+    Slic3r::GUI::MoveConnectedEndpointsCommand cmd(
+        0, std::move(eps), Vec2d(5.0, 0.0), Vec2d(6.0, 0.0));
+
+    cmd.execute(session);
+
+    // A.end moved
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(), WithinAbs(6.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].end.y(), WithinAbs(0.0, 1e-9));
+    // B.start moved
+    REQUIRE_THAT(session.layers[0].segments[1].start.x(), WithinAbs(6.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].start.y(), WithinAbs(0.0, 1e-9));
+    // A.start unchanged
+    REQUIRE_THAT(session.layers[0].segments[0].start.x(), WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].start.y(), WithinAbs(0.0, 1e-9));
+    // B.end unchanged
+    REQUIRE_THAT(session.layers[0].segments[1].end.x(), WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].end.y(), WithinAbs(5.0, 1e-9));
+
+    cmd.undo(session);
+
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(), WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].end.y(), WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].start.x(), WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].start.y(), WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("MoveConnectedEndpointsCommand — three-way star junction", "[ConnectedNodeDrag]")
+{
+    // Session: 1 layer, 3 segments meeting at (5,5):
+    //   A = (0,5)  -> (5,5)   [seg 0, end]
+    //   B = (5,5)  -> (10,5)  [seg 1, start]
+    //   C = (5,5)  -> (5,10)  [seg 2, start]
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0.0,  5.0), Vec2d(5.0, 5.0)));
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(5.0,  5.0), Vec2d(10.0, 5.0)));
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(5.0,  5.0), Vec2d(5.0, 10.0)));
+
+    // Command: move (5,5) -> (6,6)
+    std::vector<Slic3r::GUI::ConnectedEndpointRef> eps;
+    eps.push_back({0, false}); // A.end
+    eps.push_back({1, true});  // B.start
+    eps.push_back({2, true});  // C.start
+    Slic3r::GUI::MoveConnectedEndpointsCommand cmd(
+        0, std::move(eps), Vec2d(5.0, 5.0), Vec2d(6.0, 6.0));
+
+    cmd.execute(session);
+
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(),   WithinAbs(6.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].end.y(),   WithinAbs(6.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].start.x(), WithinAbs(6.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].start.y(), WithinAbs(6.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[2].start.x(), WithinAbs(6.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[2].start.y(), WithinAbs(6.0, 1e-9));
+    // Non-shared endpoints unchanged
+    REQUIRE_THAT(session.layers[0].segments[0].start.x(), WithinAbs(0.0,  1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].end.x(),   WithinAbs(10.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[2].end.y(),   WithinAbs(10.0, 1e-9));
+
+    cmd.undo(session);
+
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(),   WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].end.y(),   WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].start.x(), WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].start.y(), WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[2].start.x(), WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[2].start.y(), WithinAbs(5.0, 1e-9));
+}
+
+TEST_CASE("MoveConnectedEndpointsCommand — undo/redo cycle", "[ConnectedNodeDrag]")
+{
+    // T-junction: A = (0,0)->(5,0), B = (5,0)->(5,5)
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(5.0, 0.0)));
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(5.0, 0.0), Vec2d(5.0, 5.0)));
+
+    std::vector<Slic3r::GUI::ConnectedEndpointRef> eps;
+    eps.push_back({0, false}); // A.end
+    eps.push_back({1, true});  // B.start
+    Slic3r::GUI::MoveConnectedEndpointsCommand cmd(
+        0, std::move(eps), Vec2d(5.0, 0.0), Vec2d(6.0, 0.0));
+
+    // First execute
+    cmd.execute(session);
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(),   WithinAbs(6.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].start.x(), WithinAbs(6.0, 1e-9));
+
+    // Undo
+    cmd.undo(session);
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(),   WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].start.x(), WithinAbs(5.0, 1e-9));
+
+    // Re-execute (redo)
+    cmd.execute(session);
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(),   WithinAbs(6.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].start.x(), WithinAbs(6.0, 1e-9));
+
+    // Undo again
+    cmd.undo(session);
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(),   WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].start.x(), WithinAbs(5.0, 1e-9));
+    // Verify rest of geometry is intact
+    REQUIRE_THAT(session.layers[0].segments[0].start.x(), WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[1].end.y(),   WithinAbs(5.0, 1e-9));
+}
+
+TEST_CASE("MoveConnectedEndpointsCommand — no-op when old==new", "[ConnectedNodeDrag]")
+{
+    // Session: 1 layer, 1 segment
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(1.0, 2.0), Vec2d(3.0, 4.0)));
+
+    // Command with old_pos == new_pos
+    std::vector<Slic3r::GUI::ConnectedEndpointRef> eps;
+    eps.push_back({0, true}); // seg 0 start
+    Slic3r::GUI::MoveConnectedEndpointsCommand cmd(
+        0, std::move(eps), Vec2d(1.0, 2.0), Vec2d(1.0, 2.0));
+
+    // Should not throw, session should be unchanged
+    REQUIRE_NOTHROW(cmd.execute(session));
+    REQUIRE_THAT(session.layers[0].segments[0].start.x(), WithinAbs(1.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].start.y(), WithinAbs(2.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(),   WithinAbs(3.0, 1e-9));
+    REQUIRE_THAT(session.layers[0].segments[0].end.y(),   WithinAbs(4.0, 1e-9));
+}

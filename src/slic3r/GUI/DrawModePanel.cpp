@@ -319,6 +319,10 @@ void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
     m_redo_stack.clear();
     m_pending_start.reset();
     reset_draft(false);
+    m_dragging_ep.reset();
+    m_dragging_ctrl.reset();
+    m_dragging_connected_eps.clear();
+    m_is_dragging = false;
     m_zoom_factor = DRAW_MODE_DEFAULT_ZOOM_FACTOR;
     m_pan_offset = Vec2d(0.0, 0.0);
     m_pan_start.reset();
