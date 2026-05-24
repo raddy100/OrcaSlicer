@@ -125,6 +125,32 @@ struct ClearLayerCommand : DrawCommand {
     void undo(DrawSession& session) override;
 };
 
+// Append a set of copied segments to a layer.
+// Paste is always additive: existing segments on the target layer are preserved.
+// Undo removes exactly the appended segments (the last segments.size() entries).
+// This command is header-only so the libslic3r_tests target can link it without
+// pulling in the GUI library.
+struct PasteSegmentsCommand : DrawCommand {
+    int                      layer_index;
+    std::vector<DrawSegment> segments; // segments to append
+
+    PasteSegmentsCommand(int layer_idx, std::vector<DrawSegment> segs)
+        : layer_index(layer_idx), segments(std::move(segs)) {}
+
+    void execute(DrawSession& session) override {
+        assert(layer_index >= 0 && layer_index < session.layer_count());
+        DrawLayer& layer = session.layers[layer_index];
+        layer.segments.insert(layer.segments.end(), segments.begin(), segments.end());
+    }
+
+    void undo(DrawSession& session) override {
+        assert(layer_index >= 0 && layer_index < session.layer_count());
+        DrawLayer& layer = session.layers[layer_index];
+        assert(layer.segments.size() >= segments.size());
+        layer.segments.resize(layer.segments.size() - segments.size());
+    }
+};
+
 // Remove an entire layer (including all its segments) from the session.
 // Undoable: re-inserts the layer and restores active_layer.
 struct RemoveLayerCommand : DrawCommand {
