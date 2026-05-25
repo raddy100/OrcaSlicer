@@ -75,6 +75,12 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_paste_layer_btn->Disable(); // no clipboard yet
     m_copy_prev_btn->Disable();   // no previous layer yet
 
+    m_mirror_stack_btn = new wxButton(this, wxID_ANY, "\u2195 Mirror Stack");
+    m_mirror_stack_btn->SetToolTip(
+        "Append a reversed copy of all layers on top of the current stack.\n"
+        "Creates the Z-mirror of your structure (single undo step).");
+    m_mirror_stack_btn->Disable(); // enabled when session has >= 1 layer
+
     // Mode toggles
     m_draw_toggle = new wxToggleButton(this, wxID_ANY, "Draw");
     m_edit_toggle = new wxToggleButton(this, wxID_ANY, "Edit");
@@ -155,6 +161,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     nav_sizer->Add(m_copy_layer_btn,  0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     nav_sizer->Add(m_paste_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     nav_sizer->Add(m_copy_prev_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    nav_sizer->Add(m_mirror_stack_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
 
     auto* main_sizer = new wxBoxSizer(wxVERTICAL);
     main_sizer->Add(top_sizer, 0, wxEXPAND);
@@ -186,6 +193,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_copy_layer_btn->Bind(wxEVT_BUTTON,  &DrawModePanel::on_copy_layer,     this);
     m_paste_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_paste_layer,    this);
     m_copy_prev_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_copy_from_prev, this);
+    m_mirror_stack_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_mirror_stack,  this);
     m_simulate_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_simulate,    this);
     m_finalize_btn->Bind(wxEVT_BUTTON,   &DrawModePanel::on_finalize,    this);
     Bind(wxEVT_CHAR_HOOK,                &DrawModePanel::on_char_hook,   this);
@@ -1604,6 +1612,10 @@ void DrawModePanel::update_copy_paste_buttons()
     if (active > 0 && active < m_session.layer_count())
         has_prev = !m_session.layers[active - 1].segments.empty();
     if (m_copy_prev_btn) m_copy_prev_btn->Enable(has_prev);
+
+    // Mirror Stack: enabled whenever there is at least one layer
+    if (m_mirror_stack_btn)
+        m_mirror_stack_btn->Enable(m_session.layer_count() >= 1);
 }
 
 void DrawModePanel::on_copy_layer(wxCommandEvent&)
@@ -1641,6 +1653,24 @@ void DrawModePanel::on_copy_from_prev(wxCommandEvent&)
     }
     dispatch_command(std::make_unique<PasteSegmentsCommand>(active, prev_segs));
     if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_mirror_stack(wxCommandEvent&)
+{
+    if (m_session.layer_count() < 1) return;
+
+    // Warn if the operation will create many layers
+    const int n = m_session.layer_count();
+    if (n > 20) {
+        wxString msg = wxString::Format(
+            "This will append %d new layers (one for each existing layer in reverse order).\n"
+            "Continue?", n);
+        if (wxMessageBox(msg, "Mirror Stack", wxYES_NO | wxICON_QUESTION, this) != wxYES)
+            return;
+    }
+
+    dispatch_command(std::make_unique<MirrorStackCommand>());
+    refresh();
 }
 
 bool DrawModePanel::apply_session_to_model(bool reset_after)

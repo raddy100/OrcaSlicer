@@ -83,6 +83,7 @@ private:
     wxButton*          m_copy_layer_btn   { nullptr }; // copy current layer to clipboard
     wxButton*          m_paste_layer_btn  { nullptr }; // paste clipboard into current layer
     wxButton*          m_copy_prev_btn    { nullptr }; // copy-from-previous-layer shortcut
+    wxButton*          m_mirror_stack_btn { nullptr }; // mirror the full layer stack
     wxButton*          m_clear_btn      { nullptr };
     wxButton*          m_simulate_btn   { nullptr };
     wxButton*          m_finalize_btn   { nullptr };
@@ -239,6 +240,7 @@ private:
     void on_copy_layer(wxCommandEvent& evt);
     void on_paste_layer(wxCommandEvent& evt);
     void on_copy_from_prev(wxCommandEvent& evt);
+    void on_mirror_stack(wxCommandEvent& evt);
     void on_simulate(wxCommandEvent& evt);
     void on_finalize(wxCommandEvent& evt);
 

@@ -1259,3 +1259,195 @@ TEST_CASE("MoveConnectedEndpointsCommand — no-op when old==new", "[ConnectedNo
     REQUIRE_THAT(session.layers[0].segments[0].end.x(),   WithinAbs(3.0, 1e-9));
     REQUIRE_THAT(session.layers[0].segments[0].end.y(),   WithinAbs(4.0, 1e-9));
 }
+
+// ---------------------------------------------------------------------------
+// MirrorStackCommand — Z-mirror of the full layer stack
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MirrorStackCommand — no-op on empty session", "[MirrorStack]")
+{
+    DrawSession session;
+    Slic3r::GUI::MirrorStackCommand cmd;
+    REQUIRE_NOTHROW(cmd.execute(session));
+    REQUIRE(session.layer_count() == 0);
+    REQUIRE(session.active_layer == -1);
+}
+
+TEST_CASE("MirrorStackCommand — single layer is doubled", "[MirrorStack]")
+{
+    // Layer 0: z 0.0→0.2, 1 segment
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(
+        DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(5.0, 0.0)));
+    session.active_layer = 0;
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+
+    // Should have 2 layers
+    REQUIRE(session.layer_count() == 2);
+
+    // New layer 1 = reversed copy of layer 0: stacks above z_end=0.2
+    REQUIRE(session.layers[1].layer_index == 1);
+    REQUIRE_THAT(session.layers[1].z_start, WithinAbs(0.2, 1e-9));
+    REQUIRE_THAT(session.layers[1].z_end,   WithinAbs(0.4, 1e-9));
+    REQUIRE(session.layers[1].segments.size() == 1);
+    REQUIRE_THAT(session.layers[1].segments[0].end.x(), WithinAbs(5.0, 1e-9));
+
+    // active_layer set to last new layer
+    REQUIRE(session.active_layer == 1);
+}
+
+TEST_CASE("MirrorStackCommand — three layers mirror correctly", "[MirrorStack]")
+{
+    // Layers 0,1,2 with heights 0.2, 0.3, 0.1 and distinct segment data
+    DrawSession session;
+    session.add_layer(0.2); // layer 0: z 0.0→0.2
+    session.layers[0].segments.push_back(make_seg(0.0, 0.0, 1.0, 0.0));
+    session.add_layer(0.3); // layer 1: z 0.2→0.5
+    session.layers[1].segments.push_back(make_seg(2.0, 0.0, 3.0, 0.0));
+    session.add_layer(0.1); // layer 2: z 0.5→0.6
+    session.layers[2].segments.push_back(make_seg(4.0, 0.0, 5.0, 0.0));
+    session.active_layer = 2;
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+
+    REQUIRE(session.layer_count() == 6);
+    REQUIRE(session.active_layer == 5);
+
+    // New layer 3 = reversed of layer 2 (height 0.1): z 0.6→0.7
+    REQUIRE(session.layers[3].layer_index == 3);
+    REQUIRE_THAT(session.layers[3].z_start, WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(session.layers[3].z_end,   WithinAbs(0.7, 1e-9));
+    REQUIRE(session.layers[3].segments.size() == 1);
+    REQUIRE_THAT(session.layers[3].segments[0].start.x(), WithinAbs(4.0, 1e-9));
+    REQUIRE_THAT(session.layers[3].segments[0].end.x(),   WithinAbs(5.0, 1e-9));
+
+    // New layer 4 = reversed of layer 1 (height 0.3): z 0.7→1.0
+    REQUIRE(session.layers[4].layer_index == 4);
+    REQUIRE_THAT(session.layers[4].z_start, WithinAbs(0.7, 1e-9));
+    REQUIRE_THAT(session.layers[4].z_end,   WithinAbs(1.0, 1e-9));
+    REQUIRE(session.layers[4].segments.size() == 1);
+    REQUIRE_THAT(session.layers[4].segments[0].start.x(), WithinAbs(2.0, 1e-9));
+
+    // New layer 5 = reversed of layer 0 (height 0.2): z 1.0→1.2
+    REQUIRE(session.layers[5].layer_index == 5);
+    REQUIRE_THAT(session.layers[5].z_start, WithinAbs(1.0, 1e-9));
+    REQUIRE_THAT(session.layers[5].z_end,   WithinAbs(1.2, 1e-9));
+    REQUIRE(session.layers[5].segments.size() == 1);
+    REQUIRE_THAT(session.layers[5].segments[0].start.x(), WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(session.layers[5].segments[0].end.x(),   WithinAbs(1.0, 1e-9));
+}
+
+TEST_CASE("MirrorStackCommand — segments are deep copies (mutation independence)", "[MirrorStack]")
+{
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(
+        DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(10.0, 0.0)));
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+
+    REQUIRE(session.layer_count() == 2);
+
+    // Mutate the new (mirrored) layer's segment — original must be unchanged
+    session.layers[1].segments[0].end = Vec2d(99.0, 99.0);
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(), WithinAbs(10.0, 1e-9));
+}
+
+TEST_CASE("MirrorStackCommand — undo restores original layer count and active layer", "[MirrorStack]")
+{
+    DrawSession session;
+    session.add_layer(0.2);
+    session.layers[0].segments.push_back(make_seg(0.0, 0.0, 5.0, 0.0));
+    session.add_layer(0.2);
+    session.layers[1].segments.push_back(make_seg(5.0, 0.0, 10.0, 0.0));
+    session.active_layer = 1;
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+
+    REQUIRE(session.layer_count() == 4);
+    REQUIRE(session.active_layer == 3);
+
+    cmd.undo(session);
+
+    REQUIRE(session.layer_count() == 2);
+    REQUIRE(session.active_layer == 1);
+
+    // Original segments must still be intact
+    REQUIRE_THAT(session.layers[0].segments[0].end.x(), WithinAbs(5.0,  1e-9));
+    REQUIRE_THAT(session.layers[1].segments[0].end.x(), WithinAbs(10.0, 1e-9));
+}
+
+TEST_CASE("MirrorStackCommand — undo/redo cycle preserves symmetry", "[MirrorStack]")
+{
+    DrawSession session;
+    session.add_layer(0.3);
+    session.layers[0].segments.push_back(make_seg(1.0, 0.0, 2.0, 0.0));
+    session.add_layer(0.2);
+    session.layers[1].segments.push_back(make_seg(3.0, 0.0, 4.0, 0.0));
+    session.active_layer = 1;
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+
+    // Execute
+    cmd.execute(session);
+    REQUIRE(session.layer_count() == 4);
+
+    // Undo
+    cmd.undo(session);
+    REQUIRE(session.layer_count() == 2);
+    REQUIRE(session.active_layer == 1);
+
+    // Re-execute (redo)
+    cmd.execute(session);
+    REQUIRE(session.layer_count() == 4);
+    REQUIRE(session.active_layer == 3);
+
+    // Layer 2 = mirror of layer 1 (height 0.2), layer 3 = mirror of layer 0 (height 0.3)
+    REQUIRE_THAT(session.layers[2].layer_height(), WithinAbs(0.2, 1e-9));
+    REQUIRE_THAT(session.layers[3].layer_height(), WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(session.layers[2].segments[0].start.x(), WithinAbs(3.0, 1e-9));
+    REQUIRE_THAT(session.layers[3].segments[0].start.x(), WithinAbs(1.0, 1e-9));
+}
+
+TEST_CASE("MirrorStackCommand — layer_index values are correct after mirror", "[MirrorStack]")
+{
+    DrawSession session;
+    for (int i = 0; i < 4; ++i) {
+        session.add_layer(0.2);
+        session.layers[i].segments.push_back(make_seg(0.0, 0.0, 1.0, 0.0));
+    }
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+
+    REQUIRE(session.layer_count() == 8);
+    for (int i = 0; i < 8; ++i)
+        REQUIRE(session.layers[i].layer_index == i);
+}
+
+TEST_CASE("MirrorStackCommand — Z ranges are contiguous across all layers", "[MirrorStack]")
+{
+    DrawSession session;
+    session.add_layer(0.2); // layer 0
+    session.add_layer(0.3); // layer 1
+    session.layers[0].segments.push_back(make_seg(0.0, 0.0, 1.0, 0.0));
+    session.layers[1].segments.push_back(make_seg(0.0, 0.0, 1.0, 0.0));
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+
+    REQUIRE(session.layer_count() == 4);
+
+    // Each z_start must equal previous z_end
+    for (int i = 1; i < session.layer_count(); ++i) {
+        REQUIRE_THAT(session.layers[i].z_start,
+                     WithinAbs(session.layers[i - 1].z_end, 1e-9));
+    }
+}
+

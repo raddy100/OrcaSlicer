@@ -195,6 +195,47 @@ struct PasteSegmentsCommand : DrawCommand {
     }
 };
 
+// Append a reversed copy of all layers to the session (Z-mirror of the stack).
+// New layer N = copy of layer N-1, new layer N+1 = copy of layer N-2, etc.
+// Undo removes exactly the appended layers and restores active_layer.
+// Header-only so it can be unit-tested from test_draw_session.cpp without
+// pulling in the GUI library.
+struct MirrorStackCommand : DrawCommand {
+    int saved_layer_count { -1 }; // populated during execute() for undo
+    int saved_active      { -1 };
+
+    void execute(DrawSession& session) override {
+        saved_layer_count = session.layer_count();
+        saved_active      = session.active_layer;
+
+        if (saved_layer_count == 0) return; // no-op
+
+        double top_z = session.layers.back().z_end;
+
+        // Append layers in reverse order: N-1, N-2, ..., 0
+        for (int i = saved_layer_count - 1; i >= 0; --i) {
+            const DrawLayer& src = session.layers[i];
+            DrawLayer nlay;
+            nlay.layer_index = session.layer_count(); // current count before push_back
+            nlay.z_start     = top_z;
+            nlay.z_end       = top_z + src.layer_height();
+            nlay.segments    = src.segments; // deep copy
+            top_z            = nlay.z_end;
+            session.layers.push_back(std::move(nlay));
+        }
+
+        session.active_layer = session.layer_count() - 1;
+    }
+
+    void undo(DrawSession& session) override {
+        assert(saved_layer_count >= 0);
+        session.layers.resize(saved_layer_count);
+        // We only appended to the tail, so existing layer_index values are
+        // still correct after truncation.
+        session.active_layer = saved_active;
+    }
+};
+
 // Remove an entire layer (including all its segments) from the session.
 // Undoable: re-inserts the layer and restores active_layer.
 struct RemoveLayerCommand : DrawCommand {
