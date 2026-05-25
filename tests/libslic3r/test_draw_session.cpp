@@ -504,21 +504,25 @@ TEST_CASE("DrawSession::remove_layer - active below removed stays unchanged", "[
     REQUIRE(s.active_layer == 0);
 }
 
-TEST_CASE("DrawSession::remove_layer - Z values of remaining layers are preserved", "[DrawSession]")
+TEST_CASE("DrawSession::remove_layer - Z values of layers above are shifted down", "[DrawSession]")
 {
     DrawSession s;
     s.add_layer(0.2); // layer 0: z 0.0–0.2
-    s.add_layer(0.3); // layer 1: z 0.2–0.5
+    s.add_layer(0.3); // layer 1: z 0.2–0.5  (height 0.3 — this one is removed)
     s.add_layer(0.1); // layer 2: z 0.5–0.6
 
-    s.remove_layer(1); // remove middle layer
+    s.remove_layer(1); // remove middle layer (height 0.3)
 
     REQUIRE(s.layer_count() == 2);
+    // Layer 0 is below the removed layer — unchanged.
     REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
     REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.2, 1e-9));
-    // What was layer 2 is now layer 1
-    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.5, 1e-9));
-    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+    // What was layer 2 is now layer 1: shifted DOWN by the removed layer's height (0.3).
+    // z_start: 0.5 - 0.3 = 0.2,  z_end: 0.6 - 0.3 = 0.3
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.2, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.3, 1e-9));
+    // No Z gap — layer 1 starts where layer 0 ends.
+    REQUIRE_THAT(s.total_height(), WithinAbs(0.3, 1e-9));
 }
 
 TEST_CASE("DrawSession::remove_layer - segments in remaining layers preserved", "[DrawSession]")
@@ -1701,3 +1705,418 @@ TEST_CASE("MirrorStack: no empty top — behavior unchanged (backward compat)", 
                      WithinAbs(session.layers[i - 1].z_end, 1e-9));
 }
 
+TEST_CASE("MirrorStack: full layer navigation — travel all layers top to bottom and back", "[MirrorStack]")
+{
+    // Simulate the user's actual workflow with halfstraightthrough.3mf:
+    // 11 content layers (varying segment counts), then 1 empty layer, then Mirror Stack.
+    // After mirror, navigate from top to bottom and back to top, verifying each layer.
+
+    DrawSession s;
+    // Create 11 content layers with known segment counts mirroring the real file's structure:
+    //   layer 0:  8 segs,  layer 1: 12, layer 2: 12, layer 3: 16,
+    //   layer 4: 17 segs, layer 5: 25, layer 6: 33, layer 7: 33,
+    //   layer 8: 33 segs, layer 9: 33, layer 10: 33
+    const std::vector<int> orig_counts = {8, 12, 12, 16, 17, 25, 33, 33, 33, 33, 33};
+    const double layer_h = 0.3;
+    for (int n : orig_counts) {
+        s.add_layer(layer_h);
+        int li = s.layer_count() - 1;
+        for (int j = 0; j < n; ++j)
+            s.layers[li].segments.push_back(make_seg((double)j, 0.0, (double)j + 1.0, 0.0));
+    }
+    REQUIRE(s.layer_count() == 11);
+
+    // Add empty canvas layer (simulates user pressing "+ Layer")
+    s.add_layer(layer_h);
+    REQUIRE(s.layer_count() == 12);
+    REQUIRE(s.layers[11].segments.empty());
+
+    // Execute MirrorStack
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(s);
+
+    // Expected total: 12 original layers + (src_count-1 = 10) new = 22 layers
+    // (empty-top path: layer 11 is filled in-place, 10 new layers appended)
+    REQUIRE(s.layer_count() == 22);
+
+    // Build expected segment count table for all 22 layers:
+    //   Layers 0-10: original {8,12,12,16,17,25,33,33,33,33,33}
+    //   Layer 11: filled with copy of layer 10 = 33
+    //   Layers 12-21: copies of layers 9 down to 0
+    //     Layer 12 = copy of layer 9  = 33
+    //     Layer 13 = copy of layer 8  = 33
+    //     Layer 14 = copy of layer 7  = 33
+    //     Layer 15 = copy of layer 6  = 33
+    //     Layer 16 = copy of layer 5  = 25
+    //     Layer 17 = copy of layer 4  = 17
+    //     Layer 18 = copy of layer 3  = 16
+    //     Layer 19 = copy of layer 2  = 12
+    //     Layer 20 = copy of layer 1  = 12
+    //     Layer 21 = copy of layer 0  =  8
+    const std::vector<int> expected_counts = {
+         8, 12, 12, 16, 17, 25, 33, 33, 33, 33, 33,  // layers 0-10 (originals)
+        33,                                             // layer 11 (filled)
+        33, 33, 33, 33, 25, 17, 16, 12, 12,  8        // layers 12-21 (new mirrors)
+    };
+    REQUIRE((int)expected_counts.size() == 22);
+
+    // Navigate top to bottom: verify each layer has the right segment count
+    SECTION("Navigate top to bottom") {
+        for (int active = 21; active >= 0; --active) {
+            s.active_layer = active;
+            INFO("Checking layer " << active << " (top-to-bottom navigation)");
+            REQUIRE((int)s.layers[active].segments.size() == expected_counts[active]);
+        }
+    }
+
+    // Navigate bottom to top: verify each layer has the right segment count
+    SECTION("Navigate bottom to top") {
+        for (int active = 0; active <= 21; ++active) {
+            s.active_layer = active;
+            INFO("Checking layer " << active << " (bottom-to-top navigation)");
+            REQUIRE((int)s.layers[active].segments.size() == expected_counts[active]);
+        }
+    }
+
+    // Verify Z continuity across all layers (no Z gaps)
+    SECTION("Z continuity — no gaps") {
+        for (int i = 1; i < s.layer_count(); ++i) {
+            INFO("Z gap between layer " << (i - 1) << " and " << i);
+            REQUIRE_THAT(s.layers[i].z_start, WithinAbs(s.layers[i - 1].z_end, 1e-9));
+        }
+    }
+
+    // Symmetry check: segment counts form a palindrome
+    SECTION("Segment count palindrome symmetry") {
+        const int N = s.layer_count();
+        for (int i = 0; i < N / 2; ++i) {
+            int j = N - 1 - i;
+            INFO("Layer " << i << " vs layer " << j);
+            REQUIRE(s.layers[i].segments.size() == s.layers[j].segments.size());
+        }
+    }
+
+    // Undo: verify full restoration of the 12-layer state (11 content + 1 empty)
+    SECTION("Undo restores 12-layer state with empty top") {
+        cmd.undo(s);
+        REQUIRE(s.layer_count() == 12);
+        REQUIRE(s.layers[11].segments.empty()); // empty canvas restored
+        for (int i = 0; i < 11; ++i) {
+            INFO("Checking original layer " << i << " after undo");
+            REQUIRE((int)s.layers[i].segments.size() == orig_counts[i]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DeleteLayerZShift — Comprehensive tests for remove_layer() Z-shift fix
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DeleteLayer: delete middle layer shifts z of layers above", "[DeleteLayerZShift]")
+{
+    // 5 layers × 0.3 mm each.
+    DrawSession s;
+    for (int i = 0; i < 5; ++i)
+        s.add_layer(0.3);
+
+    // Delete layer at index 2 (z 0.6–0.9).
+    REQUIRE(s.remove_layer(2));
+    REQUIRE(s.layer_count() == 4);
+
+    // Layers 0 and 1 are below the deleted layer — unchanged.
+    REQUIRE(s.layers[0].layer_index == 0);
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.3, 1e-9));
+
+    REQUIRE(s.layers[1].layer_index == 1);
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+
+    // Layers 2 and 3 (were 3 and 4) shifted DOWN by 0.3.
+    REQUIRE(s.layers[2].layer_index == 2);
+    REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end,   WithinAbs(0.9, 1e-9));
+
+    REQUIRE(s.layers[3].layer_index == 3);
+    REQUIRE_THAT(s.layers[3].z_start, WithinAbs(0.9, 1e-9));
+    REQUIRE_THAT(s.layers[3].z_end,   WithinAbs(1.2, 1e-9));
+
+    // total_height must be 4 × 0.3 = 1.2, not the old 1.5.
+    REQUIRE_THAT(s.total_height(), WithinAbs(1.2, 1e-9));
+}
+
+TEST_CASE("DeleteLayer: delete bottom layer shifts all others down", "[DeleteLayerZShift]")
+{
+    // 4 layers × 0.3 mm each.
+    DrawSession s;
+    for (int i = 0; i < 4; ++i)
+        s.add_layer(0.3);
+    s.active_layer = 0;
+
+    REQUIRE(s.remove_layer(0));
+    REQUIRE(s.layer_count() == 3);
+
+    // All remaining layers shifted down by 0.3.
+    REQUIRE(s.layers[0].layer_index == 0);
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.3, 1e-9));
+
+    REQUIRE(s.layers[1].layer_index == 1);
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+
+    REQUIRE(s.layers[2].layer_index == 2);
+    REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end,   WithinAbs(0.9, 1e-9));
+
+    REQUIRE_THAT(s.total_height(), WithinAbs(0.9, 1e-9));
+}
+
+TEST_CASE("DeleteLayer: delete top layer does not shift others", "[DeleteLayerZShift]")
+{
+    // 4 layers × 0.3 mm each.
+    DrawSession s;
+    for (int i = 0; i < 4; ++i)
+        s.add_layer(0.3);
+
+    REQUIRE(s.remove_layer(3));
+    REQUIRE(s.layer_count() == 3);
+
+    // Layers below the deleted top are untouched.
+    REQUIRE(s.layers[0].layer_index == 0);
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.3, 1e-9));
+
+    REQUIRE(s.layers[1].layer_index == 1);
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+
+    REQUIRE(s.layers[2].layer_index == 2);
+    REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end,   WithinAbs(0.9, 1e-9));
+
+    REQUIRE_THAT(s.total_height(), WithinAbs(0.9, 1e-9));
+}
+
+TEST_CASE("DeleteLayer: undo restores z values and segments", "[DeleteLayerZShift]")
+{
+    // 4 layers × 0.3 mm each, with a unique segment on every layer.
+    DrawSession s;
+    for (int i = 0; i < 4; ++i) {
+        s.add_layer(0.3);
+        s.layers[i].segments.push_back(
+            make_seg(static_cast<double>(i), 0.0,
+                     static_cast<double>(i + 1), 0.0));
+    }
+    s.active_layer = 3;
+
+    // --- execute ---
+    Slic3r::GUI::RemoveLayerCommand cmd(1);
+    cmd.execute(s);
+
+    REQUIRE(s.layer_count() == 3);
+    // Layer 1 (was 2) shifted down.
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+    // Layer 2 (was 3) shifted down.
+    REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end,   WithinAbs(0.9, 1e-9));
+    // Segments on shifted layers are still their original data.
+    REQUIRE_THAT(s.layers[1].segments[0].start.x(), WithinAbs(2.0, 1e-9));
+    REQUIRE_THAT(s.layers[2].segments[0].start.x(), WithinAbs(3.0, 1e-9));
+
+    // --- undo ---
+    cmd.undo(s);
+
+    REQUIRE(s.layer_count() == 4);
+
+    // All four original z ranges must be restored.
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end,   WithinAbs(0.9, 1e-9));
+    REQUIRE_THAT(s.layers[3].z_start, WithinAbs(0.9, 1e-9));
+    REQUIRE_THAT(s.layers[3].z_end,   WithinAbs(1.2, 1e-9));
+
+    // All layer_index values correct.
+    for (int i = 0; i < 4; ++i)
+        REQUIRE(s.layers[i].layer_index == i);
+
+    // Segments restored.
+    for (int i = 0; i < 4; ++i) {
+        REQUIRE(s.layers[i].segments.size() == 1);
+        REQUIRE_THAT(s.layers[i].segments[0].start.x(), WithinAbs(static_cast<double>(i), 1e-9));
+    }
+
+    // active_layer restored.
+    REQUIRE(s.active_layer == 3);
+}
+
+TEST_CASE("DeleteLayer: delete first of two layers with different heights", "[DeleteLayerZShift]")
+{
+    // Layer 0: 0.3 mm, Layer 1: 0.5 mm.
+    DrawSession s;
+    s.add_layer(0.3);
+    s.add_layer(0.5);
+
+    REQUIRE(s.remove_layer(0));
+    REQUIRE(s.layer_count() == 1);
+
+    // The remaining layer (was index 1, height 0.5) must be re-anchored to z=0.
+    REQUIRE(s.layers[0].layer_index == 0);
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.5, 1e-9));
+    REQUIRE_THAT(s.total_height(),     WithinAbs(0.5, 1e-9));
+}
+
+TEST_CASE("DeleteLayer: multiple consecutive deletes cascade z correctly", "[DeleteLayerZShift]")
+{
+    // 5 layers × 0.3 mm each (total 1.5 mm).
+    DrawSession s;
+    for (int i = 0; i < 5; ++i)
+        s.add_layer(0.3);
+
+    // Delete layer at index 2 → 4 layers, total 1.2 mm.
+    REQUIRE(s.remove_layer(2));
+    REQUIRE(s.layer_count() == 4);
+    REQUIRE_THAT(s.total_height(), WithinAbs(1.2, 1e-9));
+
+    // Delete layer at index 1 → 3 layers, total 0.9 mm.
+    REQUIRE(s.remove_layer(1));
+    REQUIRE(s.layer_count() == 3);
+    REQUIRE_THAT(s.total_height(), WithinAbs(0.9, 1e-9));
+
+    // Verify final z layout and layer_index correctness.
+    REQUIRE(s.layers[0].layer_index == 0);
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.3, 1e-9));
+
+    REQUIRE(s.layers[1].layer_index == 1);
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+
+    REQUIRE(s.layers[2].layer_index == 2);
+    REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end,   WithinAbs(0.9, 1e-9));
+}
+
+TEST_CASE("DeleteLayer: z continuity — no gaps after deletion", "[DeleteLayerZShift]")
+{
+    // 8 layers alternating 0.2 mm and 0.4 mm heights.
+    DrawSession s;
+    for (int i = 0; i < 8; ++i)
+        s.add_layer((i % 2 == 0) ? 0.2 : 0.4);
+
+    // Delete three layers and verify no Z gaps remain each time.
+    // Delete at current index 1 (height 0.4).
+    REQUIRE(s.remove_layer(1));
+    // Delete at current index 2 (was original layer 3).
+    REQUIRE(s.remove_layer(2));
+    // Delete at current index 3 (was original layer 5).
+    REQUIRE(s.remove_layer(3));
+
+    // After three deletions: 5 layers remain. Verify no Z gaps.
+    REQUIRE(s.layer_count() == 5);
+    for (int i = 1; i < s.layer_count(); ++i) {
+        INFO("Z gap between layer " << (i - 1) << " and " << i);
+        REQUIRE_THAT(s.layers[i].z_start,
+                     WithinAbs(s.layers[i - 1].z_end, 1e-9));
+    }
+    // All layer_index values must match vector positions.
+    for (int i = 0; i < s.layer_count(); ++i)
+        REQUIRE(s.layers[i].layer_index == i);
+}
+
+TEST_CASE("DeleteLayer: delete only layer produces empty session", "[DeleteLayerZShift]")
+{
+    DrawSession s;
+    s.add_layer(0.3);
+    s.layers[0].segments.push_back(make_seg(0.0, 0.0, 1.0, 0.0));
+
+    REQUIRE(s.remove_layer(0));
+    REQUIRE(s.is_empty());
+    REQUIRE(s.layer_count() == 0);
+    REQUIRE(s.active_layer == -1);
+    REQUIRE_THAT(s.total_height(), WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("DeleteLayer: undo then redo (RemoveLayerCommand execute/undo/execute)", "[DeleteLayerZShift]")
+{
+    // 3 layers × 0.3 mm with known segments on each.
+    DrawSession s;
+    for (int i = 0; i < 3; ++i) {
+        s.add_layer(0.3);
+        s.layers[i].segments.push_back(
+            make_seg(static_cast<double>(i * 10), 0.0,
+                     static_cast<double>(i * 10 + 5), 0.0));
+    }
+    s.active_layer = 2;
+
+    Slic3r::GUI::RemoveLayerCommand cmd(1);
+
+    // --- First execute ---
+    cmd.execute(s);
+    REQUIRE(s.layer_count() == 2);
+    // Layer 1 (was 2) shifted down by 0.3.
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[1].segments[0].start.x(), WithinAbs(20.0, 1e-9));
+
+    // --- Undo ---
+    cmd.undo(s);
+    REQUIRE(s.layer_count() == 3);
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[1].segments[0].start.x(), WithinAbs(10.0, 1e-9)); // restored
+    REQUIRE(s.active_layer == 2);
+
+    // --- Second execute (redo) ---
+    cmd.execute(s);
+    REQUIRE(s.layer_count() == 2);
+    // Must produce identical result as the first execute.
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[1].segments[0].start.x(), WithinAbs(20.0, 1e-9));
+}
+
+TEST_CASE("DeleteLayer: 11-layer halfstraightthrough scenario", "[DeleteLayerZShift]")
+{
+    // Simulate the user's actual file: 11 layers each 0.3 mm.
+    const int N = 11;
+    DrawSession s;
+    for (int i = 0; i < N; ++i)
+        s.add_layer(0.3);
+
+    // Delete layer at index 2 (1-indexed: "layer 3").
+    REQUIRE(s.remove_layer(2));
+    REQUIRE(s.layer_count() == 10);
+
+    // Layers 0 and 1 are below the deleted layer — unchanged.
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+
+    // Layers 2–9 (were 3–10) shifted DOWN by 0.3 mm — no Z gap at old z=0.6.
+    for (int i = 2; i < 10; ++i) {
+        INFO("Checking layer " << i);
+        REQUIRE(s.layers[i].layer_index == i);
+        REQUIRE_THAT(s.layers[i].z_start,
+                     WithinAbs(0.3 * static_cast<double>(i), 1e-9));
+        REQUIRE_THAT(s.layers[i].z_end,
+                     WithinAbs(0.3 * static_cast<double>(i + 1), 1e-9));
+    }
+
+    // Z contiguity: no gaps across all remaining layers.
+    for (int i = 1; i < s.layer_count(); ++i) {
+        INFO("Z gap between layer " << (i - 1) << " and " << i);
+        REQUIRE_THAT(s.layers[i].z_start,
+                     WithinAbs(s.layers[i - 1].z_end, 1e-9));
+    }
+
+    // Total height: 10 layers × 0.3 mm = 3.0 mm (not 3.3 mm).
+    REQUIRE_THAT(s.total_height(), WithinAbs(3.0, 1e-9));
+}

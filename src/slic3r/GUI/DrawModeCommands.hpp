@@ -294,6 +294,8 @@ struct MirrorStackCommand : DrawCommand {
 
 // Remove an entire layer (including all its segments) from the session.
 // Undoable: re-inserts the layer and restores active_layer.
+// Header-only so it can be unit-tested from test_draw_session.cpp without
+// pulling in the GUI library.
 struct RemoveLayerCommand : DrawCommand {
     int       layer_index;
     DrawLayer saved_layer;  // populated during execute() for undo
@@ -302,8 +304,29 @@ struct RemoveLayerCommand : DrawCommand {
     explicit RemoveLayerCommand(int layer_idx)
         : layer_index(layer_idx), saved_active(-1) {}
 
-    void execute(DrawSession& session) override;
-    void undo(DrawSession& session) override;
+    void execute(DrawSession& session) override {
+        assert(layer_index >= 0 && layer_index < session.layer_count());
+        saved_layer  = session.layers[layer_index];
+        saved_active = session.active_layer;
+        session.remove_layer(layer_index);
+    }
+
+    void undo(DrawSession& session) override {
+        assert(layer_index >= 0 && layer_index <= session.layer_count());
+
+        const double lh = saved_layer.layer_height();
+
+        // Shift back up all layers that were shifted down during execute().
+        for (int i = layer_index; i < session.layer_count(); ++i) {
+            session.layers[i].z_start    += lh;
+            session.layers[i].z_end      += lh;
+            session.layers[i].layer_index = i + 1;
+        }
+
+        // Re-insert the saved layer (with its correct original z values and segments).
+        session.layers.insert(session.layers.begin() + layer_index, saved_layer);
+        session.active_layer = saved_active;
+    }
 };
 
 } // namespace GUI

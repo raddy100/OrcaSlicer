@@ -68,8 +68,16 @@ bool DrawSession::remove_layer(int index)
     if (index < 0 || index >= (int)layers.size())
         return false;
 
-    const int prev_active = active_layer;
+    const double lh          = layers[index].layer_height();
+    const int    prev_active = active_layer;
     layers.erase(layers.begin() + index);
+
+    // Shift z and fix layer_index for all layers that were above the removed one.
+    for (int i = index; i < (int)layers.size(); ++i) {
+        layers[i].z_start    -= lh;
+        layers[i].z_end      -= lh;
+        layers[i].layer_index = i;
+    }
 
     if (layers.empty()) {
         active_layer = -1;

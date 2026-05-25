@@ -176,24 +176,8 @@ void ClearLayerCommand::undo(DrawSession& session)
 }
 
 // ---------------------------------------------------------------------------
-// RemoveLayerCommand
+// RemoveLayerCommand — now header-only in DrawModeCommands.hpp
 // ---------------------------------------------------------------------------
-
-void RemoveLayerCommand::execute(DrawSession& session)
-{
-    assert(layer_index >= 0 && layer_index < session.layer_count());
-    saved_layer  = session.layers[layer_index];
-    saved_active = session.active_layer;
-    session.remove_layer(layer_index);
-}
-
-void RemoveLayerCommand::undo(DrawSession& session)
-{
-    // Re-insert the saved layer at its original position.
-    assert(layer_index >= 0 && layer_index <= session.layer_count());
-    session.layers.insert(session.layers.begin() + layer_index, saved_layer);
-    session.active_layer = saved_active;
-}
 
 } // namespace GUI
 } // namespace Slic3r
