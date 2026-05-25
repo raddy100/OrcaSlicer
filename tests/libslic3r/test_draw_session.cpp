@@ -1451,3 +1451,253 @@ TEST_CASE("MirrorStackCommand — Z ranges are contiguous across all layers", "[
     }
 }
 
+// ---------------------------------------------------------------------------
+// Real-world 3MF scenario — halfstraightthrough.3mf segment counts
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MirrorStackCommand — halfstraightthrough 11-layer scenario", "[MirrorStack]")
+{
+    // Segment counts matching the real halfstraightthrough.3mf file
+    // Layer 0: 8 segs, Layer 1: 12, Layer 2: 12, Layer 3: 16, Layer 4: 17,
+    // Layer 5: 25, Layers 6-10: 33 each
+    const int seg_counts[] = { 8, 12, 12, 16, 17, 25, 33, 33, 33, 33, 33 };
+    const int N = 11;
+
+    DrawSession session;
+    for (int i = 0; i < N; ++i) {
+        session.add_layer(0.2);
+        for (int s = 0; s < seg_counts[i]; ++s) {
+            // Give each segment a unique x so we can identify which layer it came from
+            session.layers[i].segments.push_back(
+                make_seg(static_cast<double>(i * 100 + s), 0.0,
+                         static_cast<double>(i * 100 + s + 1), 0.0));
+        }
+    }
+    session.active_layer = N - 1;
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+
+    // --- Basic count ---
+    REQUIRE(session.layer_count() == 2 * N); // 22 layers total
+    REQUIRE(session.active_layer == 2 * N - 1); // active = layer 21
+
+    // --- Layer index correctness ---
+    for (int i = 0; i < 2 * N; ++i)
+        REQUIRE(session.layers[i].layer_index == i);
+
+    // --- Z contiguity ---
+    for (int i = 1; i < 2 * N; ++i)
+        REQUIRE_THAT(session.layers[i].z_start,
+                     WithinAbs(session.layers[i - 1].z_end, 1e-9));
+
+    // --- Mirrored segment counts ---
+    // New layer N+k is a copy of original layer (N-1-k)
+    // i.e. layer[11] = copy of layer[10] (33 segs)
+    //      layer[12] = copy of layer[9]  (33 segs)
+    //      ...
+    //      layer[21] = copy of layer[0]  (8 segs)
+    for (int k = 0; k < N; ++k) {
+        int new_idx = N + k;
+        int src_idx = N - 1 - k;
+        REQUIRE((int)session.layers[new_idx].segments.size() == seg_counts[src_idx]);
+    }
+
+    // --- Independence: verify specific mirrored segment counts ---
+    REQUIRE((int)session.layers[11].segments.size() == 33); // copy of layer 10
+    REQUIRE((int)session.layers[15].segments.size() == 33); // copy of layer 6
+    REQUIRE((int)session.layers[16].segments.size() == 25); // copy of layer 5
+    REQUIRE((int)session.layers[17].segments.size() == 17); // copy of layer 4
+    REQUIRE((int)session.layers[18].segments.size() == 16); // copy of layer 3
+    REQUIRE((int)session.layers[19].segments.size() == 12); // copy of layer 2
+    REQUIRE((int)session.layers[20].segments.size() == 12); // copy of layer 1
+    REQUIRE((int)session.layers[21].segments.size() ==  8); // copy of layer 0
+
+    // --- Deep-copy independence: mutate new layer, original must be unchanged ---
+    session.layers[21].segments[0].end = Vec2d(999.0, 999.0);
+    // Original layer 0 segment 0 is untouched
+    REQUIRE_THAT(session.layers[0].segments[0].start.x(), WithinAbs(0.0, 1e-9));
+
+    // --- Undo restores original state ---
+    cmd.undo(session);
+    REQUIRE(session.layer_count() == N);
+    REQUIRE(session.active_layer == N - 1);
+    for (int i = 0; i < N; ++i)
+        REQUIRE((int)session.layers[i].segments.size() == seg_counts[i]);
+}
+
+// ---------------------------------------------------------------------------
+// MirrorStackCommand — empty-top-layer scenarios (Bug 1 fix)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MirrorStack: empty top layer used as first mirror canvas", "[MirrorStack]")
+{
+    // 3 content layers (1, 2, 3 segments) + 1 empty layer on top
+    DrawSession session;
+    session.add_layer(0.3); // layer 0: z 0.0→0.3,  1 seg
+    session.layers[0].segments.push_back(make_seg(0.0, 0.0, 1.0, 0.0));
+    session.add_layer(0.3); // layer 1: z 0.3→0.6,  2 segs
+    session.layers[1].segments.push_back(make_seg(2.0, 0.0, 3.0, 0.0));
+    session.layers[1].segments.push_back(make_seg(4.0, 0.0, 5.0, 0.0));
+    session.add_layer(0.3); // layer 2: z 0.6→0.9,  3 segs
+    session.layers[2].segments.push_back(make_seg(6.0, 0.0, 7.0, 0.0));
+    session.layers[2].segments.push_back(make_seg(8.0, 0.0, 9.0, 0.0));
+    session.layers[2].segments.push_back(make_seg(10.0, 0.0, 11.0, 0.0));
+    session.add_layer(0.3); // layer 3: z 0.9→1.2,  empty canvas
+    session.active_layer = 3;
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+
+    // 3 original + 1 filled + 2 new = 6 total
+    REQUIRE(session.layer_count() == 6);
+    REQUIRE(session.active_layer == 5);
+
+    // Original layers unchanged
+    REQUIRE((int)session.layers[0].segments.size() == 1);
+    REQUIRE((int)session.layers[1].segments.size() == 2);
+    REQUIRE((int)session.layers[2].segments.size() == 3);
+
+    // Layer 3: was empty, now filled with copy of layer 2 (3 segs)
+    REQUIRE((int)session.layers[3].segments.size() == 3);
+
+    // Layer 4: copy of layer 1 (2 segs)
+    REQUIRE(session.layers[4].layer_index == 4);
+    REQUIRE((int)session.layers[4].segments.size() == 2);
+
+    // Layer 5: copy of layer 0 (1 seg)
+    REQUIRE(session.layers[5].layer_index == 5);
+    REQUIRE((int)session.layers[5].segments.size() == 1);
+
+    // Z continuity: each layer's z_start == previous layer's z_end (no gaps)
+    for (int i = 1; i < session.layer_count(); ++i)
+        REQUIRE_THAT(session.layers[i].z_start,
+                     WithinAbs(session.layers[i - 1].z_end, 1e-9));
+}
+
+TEST_CASE("MirrorStack: undo restores empty top layer after fill", "[MirrorStack]")
+{
+    // Same setup: 3 content layers + 1 empty
+    DrawSession session;
+    session.add_layer(0.3);
+    session.layers[0].segments.push_back(make_seg(0.0, 0.0, 1.0, 0.0));
+    session.add_layer(0.3);
+    session.layers[1].segments.push_back(make_seg(2.0, 0.0, 3.0, 0.0));
+    session.layers[1].segments.push_back(make_seg(4.0, 0.0, 5.0, 0.0));
+    session.add_layer(0.3);
+    session.layers[2].segments.push_back(make_seg(6.0, 0.0, 7.0, 0.0));
+    session.layers[2].segments.push_back(make_seg(8.0, 0.0, 9.0, 0.0));
+    session.layers[2].segments.push_back(make_seg(10.0, 0.0, 11.0, 0.0));
+    session.add_layer(0.3); // empty canvas
+    session.active_layer = 3;
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+    REQUIRE(session.layer_count() == 6);
+
+    cmd.undo(session);
+
+    // Restored to 4 layers (3 content + 1 empty)
+    REQUIRE(session.layer_count() == 4);
+    REQUIRE(session.active_layer == 3);
+
+    // Layer 3 must be empty again
+    REQUIRE(session.layers[3].segments.empty());
+
+    // Content layers intact
+    REQUIRE((int)session.layers[0].segments.size() == 1);
+    REQUIRE((int)session.layers[1].segments.size() == 2);
+    REQUIRE((int)session.layers[2].segments.size() == 3);
+}
+
+TEST_CASE("MirrorStack: navigate all layers top-to-bottom-to-top after empty-top mirror", "[MirrorStack]")
+{
+    // 4 content layers (1,2,3,4 segs) + 1 empty = 5 layers before mirror.
+    // After: src_count=4, fill layer 4, append 3 more → 8 total.
+    // Segment pattern: 1,2,3,4 | 4,3,2,1
+    DrawSession session;
+    const int seg_pattern[] = { 1, 2, 3, 4 };
+    for (int i = 0; i < 4; ++i) {
+        session.add_layer(0.3);
+        for (int s = 0; s < seg_pattern[i]; ++s)
+            session.layers[i].segments.push_back(make_seg(0.0, 0.0, 1.0, 0.0));
+    }
+    session.add_layer(0.3); // empty top
+    session.active_layer = 4;
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+
+    REQUIRE(session.layer_count() == 8);
+
+    // Expected segment counts bottom-to-top: 1,2,3,4,4,3,2,1
+    const int expected[] = { 1, 2, 3, 4, 4, 3, 2, 1 };
+    for (int i = 0; i < 8; ++i)
+        REQUIRE((int)session.layers[i].segments.size() == expected[i]);
+
+    // Simulate navigation top-to-bottom (layer 7 → 0)
+    for (int idx = 7; idx >= 0; --idx) {
+        session.active_layer = idx;
+        REQUIRE((int)session.layers[session.active_layer].segments.size() == expected[idx]);
+    }
+    // Simulate navigation bottom-to-top (layer 0 → 7)
+    for (int idx = 0; idx <= 7; ++idx) {
+        session.active_layer = idx;
+        REQUIRE((int)session.layers[session.active_layer].segments.size() == expected[idx]);
+    }
+
+    // Z contiguity
+    for (int i = 1; i < session.layer_count(); ++i)
+        REQUIRE_THAT(session.layers[i].z_start,
+                     WithinAbs(session.layers[i - 1].z_end, 1e-9));
+}
+
+TEST_CASE("MirrorStack: only empty layer — no-op", "[MirrorStack]")
+{
+    // When the only layer is empty (src_count == 0), execute() must return
+    // early without changing the session (except that saved_layer_count is set).
+    DrawSession session;
+    session.add_layer(0.3); // empty layer 0
+    session.active_layer = 0;
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+
+    // Still 1 layer, still empty
+    REQUIRE(session.layer_count() == 1);
+    REQUIRE(session.layers[0].segments.empty());
+}
+
+TEST_CASE("MirrorStack: no empty top — behavior unchanged (backward compat)", "[MirrorStack]")
+{
+    // 3 content layers with 1,2,3 segments — no empty top.
+    // Result: 6 layers (3 original + 3 new mirrors of layers 2,1,0).
+    DrawSession session;
+    session.add_layer(0.3); // layer 0: 1 seg
+    session.layers[0].segments.push_back(make_seg(0.0, 0.0, 1.0, 0.0));
+    session.add_layer(0.3); // layer 1: 2 segs
+    session.layers[1].segments.push_back(make_seg(2.0, 0.0, 3.0, 0.0));
+    session.layers[1].segments.push_back(make_seg(4.0, 0.0, 5.0, 0.0));
+    session.add_layer(0.3); // layer 2: 3 segs
+    session.layers[2].segments.push_back(make_seg(6.0, 0.0, 7.0, 0.0));
+    session.layers[2].segments.push_back(make_seg(8.0, 0.0, 9.0, 0.0));
+    session.layers[2].segments.push_back(make_seg(10.0, 0.0, 11.0, 0.0));
+    session.active_layer = 2;
+
+    Slic3r::GUI::MirrorStackCommand cmd;
+    cmd.execute(session);
+
+    REQUIRE(session.layer_count() == 6);
+    REQUIRE(session.active_layer == 5);
+
+    // New layers are mirrors of 2, 1, 0
+    REQUIRE((int)session.layers[3].segments.size() == 3); // mirror of layer 2
+    REQUIRE((int)session.layers[4].segments.size() == 2); // mirror of layer 1
+    REQUIRE((int)session.layers[5].segments.size() == 1); // mirror of layer 0
+
+    // Z contiguity
+    for (int i = 1; i < session.layer_count(); ++i)
+        REQUIRE_THAT(session.layers[i].z_start,
+                     WithinAbs(session.layers[i - 1].z_end, 1e-9));
+}
+

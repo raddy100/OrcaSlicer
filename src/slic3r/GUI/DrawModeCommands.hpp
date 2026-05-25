@@ -196,32 +196,85 @@ struct PasteSegmentsCommand : DrawCommand {
 };
 
 // Append a reversed copy of all layers to the session (Z-mirror of the stack).
-// New layer N = copy of layer N-1, new layer N+1 = copy of layer N-2, etc.
-// Undo removes exactly the appended layers and restores active_layer.
+//
+// Normal case (no empty top layer):
+//   New layer N = copy of layer N-1, N+1 = copy of N-2, ..., 2N-1 = copy of 0.
+//
+// Empty-top-layer case (user pressed "+ Layer" before mirroring):
+//   The existing empty top layer is filled in-place with a copy of the top
+//   content layer (no Z gap at the seam), then src_count-1 new layers are
+//   appended in reverse order (copies of layers src_count-2 down to 0).
+//
+// Undo removes exactly the appended layers (and clears the filled top layer
+// back to empty if saved_top_was_empty is true), then restores active_layer.
 // Header-only so it can be unit-tested from test_draw_session.cpp without
 // pulling in the GUI library.
 struct MirrorStackCommand : DrawCommand {
-    int saved_layer_count { -1 }; // populated during execute() for undo
-    int saved_active      { -1 };
+    int  saved_layer_count  { -1 };   // populated during execute() for undo
+    int  saved_active       { -1 };
+    bool saved_top_was_empty { false }; // true when the top layer was empty
 
     void execute(DrawSession& session) override {
-        saved_layer_count = session.layer_count();
-        saved_active      = session.active_layer;
+        saved_layer_count    = session.layer_count();
+        saved_active         = session.active_layer;
+        saved_top_was_empty  = false;
 
         if (saved_layer_count == 0) return; // no-op
 
-        double top_z = session.layers.back().z_end;
+        if (session.layers.back().segments.empty()) {
+            // ----------------------------------------------------------------
+            // Empty-top-layer path
+            // ----------------------------------------------------------------
+            saved_top_was_empty = true;
+            const int src_count = saved_layer_count - 1; // number of content layers
 
-        // Append layers in reverse order: N-1, N-2, ..., 0
-        for (int i = saved_layer_count - 1; i >= 0; --i) {
-            const DrawLayer& src = session.layers[i];
-            DrawLayer nlay;
-            nlay.layer_index = session.layer_count(); // current count before push_back
-            nlay.z_start     = top_z;
-            nlay.z_end       = top_z + src.layer_height();
-            nlay.segments    = src.segments; // deep copy
-            top_z            = nlay.z_end;
-            session.layers.push_back(std::move(nlay));
+            if (src_count == 0) return; // only the empty canvas exists — nothing to mirror
+
+            // Fill the existing empty layer in-place (copy from top content layer).
+            // This eliminates the Z gap at the seam.
+            session.layers.back().segments = session.layers[src_count - 1].segments;
+
+            // top_z is the z_end of the now-filled layer — no gap.
+            double top_z = session.layers.back().z_end;
+
+            // Reserve before the loop to avoid dangling references during push_back.
+            session.layers.reserve(
+                static_cast<size_t>(saved_layer_count) +
+                static_cast<size_t>(src_count - 1));
+
+            // Append src_count-1 new layers: copies of layers src_count-2 down to 0.
+            for (int i = src_count - 2; i >= 0; --i) {
+                const DrawLayer& src = session.layers[i];
+                DrawLayer nlay;
+                nlay.layer_index = session.layer_count(); // count before push_back
+                nlay.z_start     = top_z;
+                nlay.z_end       = top_z + src.layer_height();
+                nlay.segments    = src.segments; // deep copy
+                top_z            = nlay.z_end;
+                session.layers.push_back(std::move(nlay));
+            }
+        } else {
+            // ----------------------------------------------------------------
+            // Normal path (no empty top layer) — original behaviour unchanged
+            // ----------------------------------------------------------------
+
+            // Reserve before the loop so push_back never reallocates while we
+            // hold a reference (src) into the same vector — avoids dangling-ref UB.
+            session.layers.reserve(2 * static_cast<size_t>(saved_layer_count));
+
+            double top_z = session.layers.back().z_end;
+
+            // Append layers in reverse order: N-1, N-2, ..., 0
+            for (int i = saved_layer_count - 1; i >= 0; --i) {
+                const DrawLayer& src = session.layers[i];
+                DrawLayer nlay;
+                nlay.layer_index = session.layer_count(); // count before push_back
+                nlay.z_start     = top_z;
+                nlay.z_end       = top_z + src.layer_height();
+                nlay.segments    = src.segments; // deep copy
+                top_z            = nlay.z_end;
+                session.layers.push_back(std::move(nlay));
+            }
         }
 
         session.active_layer = session.layer_count() - 1;
@@ -232,6 +285,9 @@ struct MirrorStackCommand : DrawCommand {
         session.layers.resize(saved_layer_count);
         // We only appended to the tail, so existing layer_index values are
         // still correct after truncation.
+        // If the top layer was empty before execute(), restore it to empty.
+        if (saved_top_was_empty && saved_layer_count > 0)
+            session.layers.back().segments.clear();
         session.active_layer = saved_active;
     }
 };

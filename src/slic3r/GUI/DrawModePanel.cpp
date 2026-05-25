@@ -358,7 +358,10 @@ void DrawModePanel::refresh()
 {
     update_layer_label();
     update_copy_paste_buttons();
-    if (m_canvas) m_canvas->Refresh(false);
+    if (m_canvas) {
+        m_canvas->Refresh(false);
+        m_canvas->Update(); // force synchronous repaint — prevents phantom-empty-layer on first visit
+    }
 }
 
 bool DrawModePanel::restore_existing_draw_object(PartPlate* plate)
@@ -1659,12 +1662,21 @@ void DrawModePanel::on_mirror_stack(wxCommandEvent&)
 {
     if (m_session.layer_count() < 1) return;
 
-    // Warn if the operation will create many layers
-    const int n = m_session.layer_count();
-    if (n > 20) {
+    const int  n            = m_session.layer_count();
+    const bool top_is_empty = m_session.layers.back().segments.empty();
+    const int  src_count    = top_is_empty ? n - 1 : n;
+
+    if (src_count == 0) return; // only an empty canvas layer exists — nothing to mirror
+
+    // Actual number of new layers that will be appended:
+    //   • empty-top path: fills the top layer in-place, appends src_count-1 new layers
+    //   • normal path:    appends src_count new layers (one per existing layer)
+    const int new_layers = top_is_empty ? src_count - 1 : src_count;
+
+    if (new_layers > 20) {
         wxString msg = wxString::Format(
-            "This will append %d new layers (one for each existing layer in reverse order).\n"
-            "Continue?", n);
+            "This will append %d new layers (one for each content layer mirrored in reverse).\n"
+            "Continue?", new_layers);
         if (wxMessageBox(msg, "Mirror Stack", wxYES_NO | wxICON_QUESTION, this) != wxYES)
             return;
     }
