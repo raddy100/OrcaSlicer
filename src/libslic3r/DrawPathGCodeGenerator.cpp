@@ -288,7 +288,10 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
 {
     std::string out;
 
-    // Layer progress marker for G-code viewer / progress tracking.
+    // Layer change marker — GCodeProcessor uses this tag to increment m_layer_id,
+    // which drives the layer slider in the simulate/preview window.
+    out += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change) + "\n";
+    // Human-readable layer number comment (also used by fan-ramp tests to locate layer blocks).
     out += ";LAYER:" + std::to_string(layer.layer_index) + "\n";
 
     // Per-layer fan speed (ramp from 0 to max over the configured layer range).

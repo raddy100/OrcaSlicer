@@ -2120,3 +2120,203 @@ TEST_CASE("DeleteLayer: 11-layer halfstraightthrough scenario", "[DeleteLayerZSh
     // Total height: 10 layers × 0.3 mm = 3.0 mm (not 3.3 mm).
     REQUIRE_THAT(s.total_height(), WithinAbs(3.0, 1e-9));
 }
+
+// ---------------------------------------------------------------------------
+// Edge-case tests — independent validation (added by code reviewer)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DeleteLayer: insert_layer then remove_layer are perfect inverses", "[DeleteLayerZShift]")
+{
+    // Create 3 layers each 0.3 mm.
+    DrawSession s;
+    s.add_layer(0.3);
+    s.add_layer(0.3);
+    s.add_layer(0.3);
+    REQUIRE(s.layer_count() == 3);
+
+    // Record original z values.
+    const double orig_z_start[3] = { s.layers[0].z_start, s.layers[1].z_start, s.layers[2].z_start };
+    const double orig_z_end[3]   = { s.layers[0].z_end,   s.layers[1].z_end,   s.layers[2].z_end   };
+
+    // Insert a new 0.3mm layer at position 2 (after layer 1) directly via the
+    // DrawSession API.  InsertLayerAfterActiveCommand is not header-only so it
+    // is unavailable in libslic3r_tests; insert_layer() is sufficient here.
+    s.insert_layer(2, 0.3);
+
+    // Now 4 layers.
+    REQUIRE(s.layer_count() == 4);
+    REQUIRE(s.active_layer == 2); // newly inserted layer is active
+
+    // Layers 0 and 1 must be unchanged.
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(orig_z_start[0], 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(orig_z_end[0],   1e-9));
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(orig_z_start[1], 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(orig_z_end[1],   1e-9));
+
+    // The inserted layer (index 2) fills z 0.6→0.9.
+    REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end,   WithinAbs(0.9, 1e-9));
+
+    // Old layer 2 (now index 3) was pushed up by 0.3 mm.
+    REQUIRE_THAT(s.layers[3].z_start, WithinAbs(orig_z_start[2] + 0.3, 1e-9));
+    REQUIRE_THAT(s.layers[3].z_end,   WithinAbs(orig_z_end[2]   + 0.3, 1e-9));
+
+    // Now remove the newly-inserted layer at position 2.
+    Slic3r::GUI::RemoveLayerCommand rem(2);
+    rem.execute(s);
+
+    // Must be back to exactly 3 layers.
+    REQUIRE(s.layer_count() == 3);
+
+    // Z values must be exactly the originals (within 1e-9).
+    for (int i = 0; i < 3; ++i) {
+        INFO("Checking layer " << i << " after insert+remove roundtrip");
+        REQUIRE_THAT(s.layers[i].z_start, WithinAbs(orig_z_start[i], 1e-9));
+        REQUIRE_THAT(s.layers[i].z_end,   WithinAbs(orig_z_end[i],   1e-9));
+        REQUIRE(s.layers[i].layer_index == i);
+    }
+}
+
+TEST_CASE("DeleteLayer: remove then mirror stack produces contiguous Z", "[DeleteLayerZShift]")
+{
+    // Create 5 layers each 0.3 mm, each with one content segment.
+    DrawSession s;
+    for (int i = 0; i < 5; ++i) {
+        s.add_layer(0.3);
+        s.layers[i].segments.push_back(make_seg(
+            static_cast<double>(i), 0.0, static_cast<double>(i + 1), 0.0));
+    }
+    REQUIRE(s.layer_count() == 5);
+
+    // Delete layer at index 2 → 4 layers remain.
+    Slic3r::GUI::RemoveLayerCommand rem2(2);
+    rem2.execute(s);
+    REQUIRE(s.layer_count() == 4);
+
+    // Z continuity after delete.
+    for (int i = 1; i < s.layer_count(); ++i)
+        REQUIRE_THAT(s.layers[i].z_start, WithinAbs(s.layers[i - 1].z_end, 1e-9));
+
+    // Add one empty layer on top (simulates user pressing "+ Layer").
+    s.add_layer(0.3);
+    REQUIRE(s.layer_count() == 5);
+    REQUIRE(s.layers[4].segments.empty());
+
+    // Run MirrorStackCommand.  With an empty top layer:
+    //   src_count = 4 (content layers 0..3)
+    //   layer 4 is filled in-place with copy of layer 3
+    //   src_count-1 = 3 new layers appended (copies of layers 2, 1, 0)
+    //   Total = 5 + 3 = 8 layers.
+    Slic3r::GUI::MirrorStackCommand mirror;
+    mirror.execute(s);
+
+    REQUIRE(s.layer_count() == 8);
+
+    // Verify NO Z gaps anywhere — every z_start == previous z_end.
+    for (int i = 1; i < s.layer_count(); ++i) {
+        INFO("Z gap at layer " << i);
+        REQUIRE_THAT(s.layers[i].z_start, WithinAbs(s.layers[i - 1].z_end, 1e-9));
+    }
+
+    // All layer_index values must be sequential.
+    for (int i = 0; i < s.layer_count(); ++i)
+        REQUIRE(s.layers[i].layer_index == i);
+}
+
+TEST_CASE("DeleteLayer: 3MF round-trip preserves corrected z values", "[DeleteLayerZShift]")
+{
+    // This test verifies that after a delete the session's z values are
+    // correct for subsequent serialization (total_height and per-layer z).
+    DrawSession s;
+    for (int i = 0; i < 4; ++i) {
+        s.add_layer(0.3);
+        s.layers[i].segments.push_back(make_seg(
+            static_cast<double>(i), 0.0, static_cast<double>(i + 1), 0.0));
+    }
+    REQUIRE(s.layer_count() == 4);
+
+    // Delete layer at index 1.
+    Slic3r::GUI::RemoveLayerCommand rem(1);
+    rem.execute(s);
+
+    // 3 layers must remain with z: [0, 0.3], [0.3, 0.6], [0.6, 0.9].
+    REQUIRE(s.layer_count() == 3);
+
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.3, 1e-9));
+
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+
+    REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.6, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end,   WithinAbs(0.9, 1e-9));
+
+    // total_height() must reflect the corrected stack height exactly.
+    REQUIRE_THAT(s.total_height(), WithinAbs(0.9, 1e-9));
+
+    // No Z gaps.
+    for (int i = 1; i < s.layer_count(); ++i)
+        REQUIRE_THAT(s.layers[i].z_start, WithinAbs(s.layers[i - 1].z_end, 1e-9));
+}
+
+TEST_CASE("DeleteLayer: delete-then-undo does not leak z shifts", "[DeleteLayerZShift]")
+{
+    // Regression: repeated delete+undo cycles must not accumulate Z drift.
+    DrawSession s;
+    s.add_layer(0.3);
+    s.add_layer(0.3);
+    s.add_layer(0.3);
+    s.add_layer(0.3);
+    REQUIRE(s.layer_count() == 4);
+
+    // Snapshot original z values for all 4 layers.
+    struct ZSnap { double z_start, z_end; };
+    ZSnap orig[4];
+    for (int i = 0; i < 4; ++i)
+        orig[i] = { s.layers[i].z_start, s.layers[i].z_end };
+
+    auto verify_original = [&](const char* label) {
+        INFO(label);
+        REQUIRE(s.layer_count() == 4);
+        for (int i = 0; i < 4; ++i) {
+            INFO("  layer " << i);
+            REQUIRE_THAT(s.layers[i].z_start, WithinAbs(orig[i].z_start, 1e-9));
+            REQUIRE_THAT(s.layers[i].z_end,   WithinAbs(orig[i].z_end,   1e-9));
+            REQUIRE(s.layers[i].layer_index == i);
+        }
+    };
+
+    auto verify_after_delete = [&](const char* label) {
+        INFO(label);
+        REQUIRE(s.layer_count() == 3);
+        // Layer 0 unchanged.
+        REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+        REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.3, 1e-9));
+        // Layers 1 and 2 shifted down by 0.3.
+        REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.3, 1e-9));
+        REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.6, 1e-9));
+        REQUIRE_THAT(s.layers[2].z_start, WithinAbs(0.6, 1e-9));
+        REQUIRE_THAT(s.layers[2].z_end,   WithinAbs(0.9, 1e-9));
+        REQUIRE(s.layers[0].layer_index == 0);
+        REQUIRE(s.layers[1].layer_index == 1);
+        REQUIRE(s.layers[2].layer_index == 2);
+    };
+
+    // Cycle 1: delete layer 1.
+    Slic3r::GUI::RemoveLayerCommand cmd1(1);
+    cmd1.execute(s);
+    verify_after_delete("After first delete");
+
+    // Undo: must restore exactly.
+    cmd1.undo(s);
+    verify_original("After first undo");
+
+    // Cycle 2: delete layer 1 again — shift must be identical, not doubled.
+    Slic3r::GUI::RemoveLayerCommand cmd2(1);
+    cmd2.execute(s);
+    verify_after_delete("After second delete");
+
+    // Undo again: must restore exactly.
+    cmd2.undo(s);
+    verify_original("After second undo");
+}
