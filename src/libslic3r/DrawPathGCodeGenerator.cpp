@@ -268,11 +268,6 @@ std::string DrawPathGCodeGenerator::generate_preamble(const DrawSession& session
     filament_config.set_key_value("layer_num", new ConfigOptionInt(0));
     out += process_config_gcode_strings("filament_start_gcode", 0, &filament_config);
 
-    // Fan on.
-    const double fan_min = cfg_float_vec("fan_min_speed");
-    if (fan_min > 0.0)
-        out += m_writer.set_fan(static_cast<unsigned int>(fan_min));
-
     // Move to the first layer's print height before beginning.
     // Use z_end (the actual print height), NOT z_start which is 0 for the first layer.
     if (!session.layers.empty()) {
@@ -292,6 +287,12 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
                                                     const Vec2d&     abs_offset)
 {
     std::string out;
+
+    // Layer progress marker for G-code viewer / progress tracking.
+    out += ";LAYER:" + std::to_string(layer.layer_index) + "\n";
+
+    // Per-layer fan speed (ramp from 0 to max over the configured layer range).
+    out += m_writer.set_fan(static_cast<unsigned int>(calc_fan_speed_pct(layer.layer_index)));
 
     const bool is_first = (layer.layer_index == 0);
 
@@ -421,6 +422,33 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
     }
 
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Private: fan speed helper
+// ---------------------------------------------------------------------------
+
+int DrawPathGCodeGenerator::calc_fan_speed_pct(int layer_index) const
+{
+    int   close_fan_x  = cfg_int_vec("close_fan_the_first_x_layers");
+    int   full_fan_lyr = cfg_int_vec("full_fan_speed_layer");
+    float fan_max      = static_cast<float>(cfg_float_vec("fan_max_speed"));
+
+    // Match CoolingBuffer: force at least 1 closed layer when ramping is on.
+    if (close_fan_x <= 0 && full_fan_lyr > 0)
+        close_fan_x = 1;
+
+    if (layer_index < close_fan_x)
+        return 0;
+
+    // Draw layers are always short: assume full cooling intent (fan_max).
+    float speed = fan_max;
+    if (full_fan_lyr > close_fan_x && (layer_index + 1) < full_fan_lyr) {
+        const float factor = float(layer_index + 1 - close_fan_x)
+                           / float(full_fan_lyr  - close_fan_x);
+        speed = std::clamp(fan_max * factor, 0.0f, 100.0f);
+    }
+    return static_cast<int>(speed + 0.5f);
 }
 
 // ---------------------------------------------------------------------------

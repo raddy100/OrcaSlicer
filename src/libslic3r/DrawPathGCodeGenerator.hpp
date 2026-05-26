@@ -82,6 +82,11 @@ private:
     // PRD-MAP: "extrusion_multiplier" → uses print_flow_ratio from process config.
     double calc_extrusion(double segment_length_mm) const;
 
+    // Returns fan speed as 0-100 percent for the given layer index.
+    // Matches CoolingBuffer ramp: off for first close_fan_the_first_x_layers,
+    // linearly ramps to fan_max_speed by full_fan_speed_layer.
+    int calc_fan_speed_pct(int layer_index) const;
+
     // Helpers to read typed config values safely (return 0.0 / 0 if key absent).
     double  cfg_float(const std::string& key) const;
     int     cfg_int  (const std::string& key) const;

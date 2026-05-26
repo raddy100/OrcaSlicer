@@ -63,7 +63,10 @@ static DynamicPrintConfig make_test_config(double nozzle_d = 0.4,
     cfg.set_key_value("print_flow_ratio", new ConfigOptionFloat(flow_ratio));
 
     // Fan
-    cfg.set_key_value("fan_min_speed", new ConfigOptionFloats({ 0.0 }));
+    cfg.set_key_value("fan_min_speed",                new ConfigOptionFloats({ 20.0 }));
+    cfg.set_key_value("fan_max_speed",                new ConfigOptionFloats({ 100.0 }));
+    cfg.set_key_value("close_fan_the_first_x_layers", new ConfigOptionInts({ 1 }));
+    cfg.set_key_value("full_fan_speed_layer",          new ConfigOptionInts({ 5 }));
 
     // Machine limits (required by apply_print_config internals via GCodeConfig)
     cfg.set_key_value("use_relative_e_distances", new ConfigOptionBool(false));
@@ -1231,4 +1234,147 @@ TEST_CASE("DrawPathGCodeGenerator: degenerate arc (collinear) in native mode fal
     // Degenerate arc → G1 fallback, no G2/G3.
     REQUIRE(count_lines_starting_with(gcode, "G2 ") == 0);
     REQUIRE(count_lines_starting_with(gcode, "G3 ") == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Fan ramp + LAYER marker tests
+// ---------------------------------------------------------------------------
+
+// Build a session with N simple layers, each containing one extrusion segment.
+static DrawSession make_n_layer_session(int n, double layer_height = 0.3)
+{
+    DrawSession session;
+    for (int i = 0; i < n; ++i) {
+        session.add_layer(layer_height);
+        DrawLayer& l = session.layers.back();
+        // Simple horizontal extrusion segment for each layer.
+        l.segments.push_back({ Vec2d(0.0, static_cast<double>(i)), Vec2d(10.0, static_cast<double>(i)), false });
+    }
+    return session;
+}
+
+// Returns the M106 S<value> for the layer block starting at ";LAYER:N".
+// Searches only within the block ending at the next ";LAYER:" marker (or end of gcode).
+static std::optional<int> extract_layer_fan_speed(const std::string& gcode, int layer_n)
+{
+    const std::string marker = ";LAYER:" + std::to_string(layer_n) + "\n";
+    auto pos = gcode.find(marker);
+    if (pos == std::string::npos) return std::nullopt;
+    // Find next layer marker (bounds the search region).
+    auto next_layer = gcode.find(";LAYER:", pos + marker.size());
+    auto m106_pos   = gcode.find("M106 S", pos);
+    if (m106_pos == std::string::npos || m106_pos > next_layer) return std::nullopt;
+    return std::stoi(gcode.substr(m106_pos + 6));
+}
+
+TEST_CASE("DrawPathGCodeGenerator: fan off for first N layers", "[FanRamp]")
+{
+    // close_fan_x=2 → layers 0 and 1 have fan off; layers 2+ have fan on.
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("close_fan_the_first_x_layers", new ConfigOptionInts({ 2 }));
+    cfg.set_key_value("full_fan_speed_layer",          new ConfigOptionInts({ 6 }));
+    cfg.set_key_value("fan_max_speed",                 new ConfigOptionFloats({ 100.0 }));
+
+    DrawSession session = make_n_layer_session(8);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    // Layers 0 and 1 must have fan off (M106 S0).
+    for (int i = 0; i <= 1; ++i) {
+        auto val = extract_layer_fan_speed(gcode, i);
+        REQUIRE(val.has_value());
+        REQUIRE(*val == 0);
+    }
+
+    // Layers 2+ must have fan speed > 0.
+    for (int i = 2; i <= 7; ++i) {
+        auto val = extract_layer_fan_speed(gcode, i);
+        REQUIRE(val.has_value());
+        REQUIRE(*val > 0);
+    }
+}
+
+TEST_CASE("DrawPathGCodeGenerator: fan ramps from near-0 to max", "[FanRamp]")
+{
+    // close_fan_x=1, full_fan=5, fan_max=100%
+    // Expected M106 S values per layer (formula: factor=(idx+1-close)/(full-close)):
+    //   Layer 0: off → S0
+    //   Layer 1: factor=1/4=0.25 → pct=25 → S=int(255.5*25/100)=63
+    //   Layer 2: factor=2/4=0.5  → pct=50 → S=127
+    //   Layer 3: factor=3/4=0.75 → pct=75 → S=191
+    //   Layer 4: (idx+1)=5=full_fan → no ramp → pct=100 → S=255
+    //   Layer 5+: full → S=255
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("close_fan_the_first_x_layers", new ConfigOptionInts({ 1 }));
+    cfg.set_key_value("full_fan_speed_layer",          new ConfigOptionInts({ 5 }));
+    cfg.set_key_value("fan_max_speed",                 new ConfigOptionFloats({ 100.0 }));
+
+    DrawSession session = make_n_layer_session(7);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    const std::vector<int> expected_s = { 0, 63, 127, 191, 255, 255, 255 };
+    for (int i = 0; i < 7; ++i) {
+        auto val = extract_layer_fan_speed(gcode, i);
+        REQUIRE(val.has_value());
+        REQUIRE_THAT(*val, Catch::Matchers::WithinAbs(expected_s[i], 2));
+    }
+}
+
+TEST_CASE("DrawPathGCodeGenerator: fan at max when no ramp configured", "[FanRamp]")
+{
+    // close_fan_x=0, full_fan=0: no ramp zone → fan_max from layer 0 onward.
+    // fan_max=80% → PWM = int(255.5 * 80 / 100) = int(204.4) = 204.
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("close_fan_the_first_x_layers", new ConfigOptionInts({ 0 }));
+    cfg.set_key_value("full_fan_speed_layer",          new ConfigOptionInts({ 0 }));
+    cfg.set_key_value("fan_max_speed",                 new ConfigOptionFloats({ 80.0 }));
+
+    DrawSession session = make_n_layer_session(3);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    for (int i = 0; i < 3; ++i) {
+        auto val = extract_layer_fan_speed(gcode, i);
+        REQUIRE(val.has_value());
+        REQUIRE_THAT(*val, Catch::Matchers::WithinAbs(204, 2));
+    }
+}
+
+TEST_CASE("DrawPathGCodeGenerator: LAYER markers emitted for each layer", "[FanRamp]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    DrawSession session = make_n_layer_session(5);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    // Each ;LAYER:N marker must appear at least once.
+    for (int i = 0; i < 5; ++i) {
+        const std::string marker = ";LAYER:" + std::to_string(i);
+        REQUIRE(gcode.find(marker) != std::string::npos);
+    }
+
+    // ;LAYER:0 must appear before ;LAYER:1.
+    REQUIRE(gcode.find(";LAYER:0") < gcode.find(";LAYER:1"));
+    REQUIRE(gcode.find(";LAYER:1") < gcode.find(";LAYER:2"));
+    REQUIRE(gcode.find(";LAYER:2") < gcode.find(";LAYER:3"));
+    REQUIRE(gcode.find(";LAYER:3") < gcode.find(";LAYER:4"));
+}
+
+TEST_CASE("DrawPathGCodeGenerator: no fan when fan_max_speed=0", "[FanRamp]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("fan_max_speed",                 new ConfigOptionFloats({ 0.0 }));
+    cfg.set_key_value("close_fan_the_first_x_layers", new ConfigOptionInts({ 0 }));
+    cfg.set_key_value("full_fan_speed_layer",          new ConfigOptionInts({ 0 }));
+
+    DrawSession session = make_n_layer_session(3);
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    for (int i = 0; i < 3; ++i) {
+        auto val = extract_layer_fan_speed(gcode, i);
+        REQUIRE(val.has_value());
+        REQUIRE(*val == 0);
+    }
 }
