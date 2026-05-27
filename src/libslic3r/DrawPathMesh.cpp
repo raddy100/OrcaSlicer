@@ -27,7 +27,7 @@ void push_path_if_valid(std::vector<DrawPolyline>& paths, DrawPolyline& path)
     path.clear();
 }
 
-std::vector<DrawPolyline> collect_extrusion_polylines(const DrawLayer& layer)
+std::vector<DrawPolyline> collect_extrusion_polylines(const DrawLayer& layer, double tol)
 {
     std::vector<DrawPolyline> paths;
     DrawPolyline current;
@@ -38,7 +38,7 @@ std::vector<DrawPolyline> collect_extrusion_polylines(const DrawLayer& layer)
             continue;
         }
 
-        const std::vector<Vec2d> sampled = draw_sample_segment(seg);
+        const std::vector<Vec2d> sampled = draw_sample_segment(seg, tol);
 
         if (current.empty()) {
             // Start a new chain with all sampled points.
@@ -107,12 +107,13 @@ TriangleMesh make_draw_path_mesh(const DrawSession& session, double nozzle_diame
         return TriangleMesh();
 
     const double width = std::max(nozzle_diameter, 0.01);
+    const double tol   = session.curve_tolerance_mm;
     indexed_triangle_set mesh;
 
     for (const DrawLayer& layer : session.layers) {
         Polygons layer_polygons;
 
-        for (const DrawPolyline& path : collect_extrusion_polylines(layer)) {
+        for (const DrawPolyline& path : collect_extrusion_polylines(layer, tol)) {
             Polyline polyline = Polyline::new_scale(path);
             Polygons stroked = offset(
                 polyline,

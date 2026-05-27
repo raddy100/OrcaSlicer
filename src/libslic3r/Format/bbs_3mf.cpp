@@ -2643,7 +2643,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             pt::read_xml(iss, tree);
 
             DrawSession session;
-            for (const auto& layer_kv : tree.get_child("draw_session")) {
+            const pt::ptree& ds_tree = tree.get_child("draw_session");
+            session.curve_tolerance_mm = ds_tree.get<double>("<xmlattr>.curve_tolerance_mm", 0.05);
+            session.native_arc_output  = ds_tree.get<int>("<xmlattr>.native_arc_output", 0) != 0;
+
+            for (const auto& layer_kv : ds_tree) {
                 if (layer_kv.first != "layer") continue;
                 const pt::ptree& lt = layer_kv.second;
 
@@ -7485,6 +7489,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             pt::ptree& root = tree.add("draw_session", "");
             root.put("<xmlattr>.version", "2");
             root.put("<xmlattr>.layer_count", session.layer_count());
+            root.put("<xmlattr>.curve_tolerance_mm", session.curve_tolerance_mm);
+            root.put("<xmlattr>.native_arc_output",  session.native_arc_output ? 1 : 0);
 
             for (const DrawLayer& layer : session.layers) {
                 pt::ptree& layer_node = root.add("layer", "");

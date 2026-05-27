@@ -1053,11 +1053,12 @@ static DynamicPrintConfig make_arc_config(bool native_arc)
 }
 
 // A quarter-circle CCW arc session: from (10,0) through (7.071,7.071) to (0,10).
-static DrawSession make_ccw_arc_session()
+static DrawSession make_ccw_arc_session(bool native_arc = false)
 {
     constexpr double R    = 10.0;
     const double    cos45 = std::cos(M_PI / 4.0);
     DrawSession session;
+    session.native_arc_output = native_arc;
     session.add_layer(0.2);
     session.layers[0].segments.push_back(
         DrawSegment::make_arc(Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R)));
@@ -1065,11 +1066,12 @@ static DrawSession make_ccw_arc_session()
 }
 
 // The same arc but traversed CW: from (0,10) through (7.071,7.071) to (10,0).
-static DrawSession make_cw_arc_session()
+static DrawSession make_cw_arc_session(bool native_arc = false)
 {
     constexpr double R    = 10.0;
     const double    cos45 = std::cos(M_PI / 4.0);
     DrawSession session;
+    session.native_arc_output = native_arc;
     session.add_layer(0.2);
     session.layers[0].segments.push_back(
         DrawSegment::make_arc(Vec2d(0.0, R), Vec2d(R * cos45, R * cos45), Vec2d(R, 0.0)));
@@ -1147,7 +1149,7 @@ TEST_CASE("DrawPathGCodeGenerator: native mode arc emits G2 or G3 command", "[Dr
 {
     DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/true);
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
-    const std::string gcode = gen.generate(make_ccw_arc_session());
+    const std::string gcode = gen.generate(make_ccw_arc_session(/*native_arc=*/true));
 
     const std::size_t g2_count = count_lines_starting_with(gcode, "G2 ");
     const std::size_t g3_count = count_lines_starting_with(gcode, "G3 ");
@@ -1158,7 +1160,7 @@ TEST_CASE("DrawPathGCodeGenerator: CCW arc in native mode emits G3 (not G2)", "[
 {
     DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/true);
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
-    const std::string gcode = gen.generate(make_ccw_arc_session());
+    const std::string gcode = gen.generate(make_ccw_arc_session(/*native_arc=*/true));
 
     REQUIRE(count_lines_starting_with(gcode, "G3 ") >= 1);
     REQUIRE(count_lines_starting_with(gcode, "G2 ") == 0);
@@ -1168,7 +1170,7 @@ TEST_CASE("DrawPathGCodeGenerator: CW arc in native mode emits G2 (not G3)", "[D
 {
     DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/true);
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
-    const std::string gcode = gen.generate(make_cw_arc_session());
+    const std::string gcode = gen.generate(make_cw_arc_session(/*native_arc=*/true));
 
     REQUIRE(count_lines_starting_with(gcode, "G2 ") >= 1);
     REQUIRE(count_lines_starting_with(gcode, "G3 ") == 0);

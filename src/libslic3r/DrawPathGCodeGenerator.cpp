@@ -63,6 +63,10 @@ std::string DrawPathGCodeGenerator::generate(const DrawSession& session,
     // Total XY offset to convert plate-relative → absolute machine coords.
     const Vec2d abs_offset = m_plate_origin + instance_offset;
 
+    // Capture per-session settings before generating layers.
+    m_curve_tol  = session.curve_tolerance_mm;
+    m_native_arc = session.native_arc_output;
+
     std::string gcode;
     gcode.reserve(1024 * 64);
 
@@ -101,6 +105,9 @@ std::string DrawPathGCodeGenerator::generate_batch(const std::vector<BatchItem>&
 
     for (const auto& [sess, inst_offset] : items) {
         if (!sess || sess->is_empty()) continue;
+        // Update per-session settings for this batch item's layers.
+        m_curve_tol  = sess->curve_tolerance_mm;
+        m_native_arc = sess->native_arc_output;
         const Vec2d abs_offset = m_plate_origin + inst_offset;
         for (const DrawLayer& layer : sess->layers) {
             gcode += generate_layer(layer, abs_offset);
@@ -318,7 +325,7 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
     const double layer_z = layer.z_end;
 
     // Read arc output mode once per layer.
-    const bool native_arc_mode = cfg_int("draw_path_arc_output") != 0;
+    const bool native_arc_mode = m_native_arc;
 
     for (const DrawSegment& seg : layer.segments) {
         const Vec2d abs_start = seg.start + abs_offset;
@@ -342,7 +349,7 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
                 out += m_writer.travel_to_xyz(Vec3d(abs_end.x(), abs_end.y(), layer_z), "travel");
             } else {
                 // Sample arc/bezier and travel through each waypoint.
-                const std::vector<Vec2d> pts = draw_sample_segment(seg);
+                const std::vector<Vec2d> pts = draw_sample_segment(seg, m_curve_tol);
                 for (size_t i = 1; i < pts.size(); ++i) {
                     const Vec2d abs_pt = pts[i] + abs_offset;
                     out += m_writer.travel_to_xyz(Vec3d(abs_pt.x(), abs_pt.y(), layer_z), "travel");
@@ -401,7 +408,7 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
                     const bool is_ccw = (cross > 0.0);
 
                     // Use sampled length for accurate extrusion volume.
-                    const double arc_length = draw_segment_sampled_length(seg);
+                    const double arc_length = draw_segment_sampled_length(seg, m_curve_tol);
                     const double dE = calc_extrusion(arc_length);
 
                     out += m_writer.extrude_arc_to_xy(
@@ -410,7 +417,7 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
 
             } else {
                 // Compatibility mode for arcs, or any bezier: G1 linearization.
-                const std::vector<Vec2d> pts = draw_sample_segment(seg);
+                const std::vector<Vec2d> pts = draw_sample_segment(seg, m_curve_tol);
                 for (size_t i = 1; i < pts.size(); ++i) {
                     const Vec2d abs_pt  = pts[i]     + abs_offset;
                     const Vec2d abs_prev = pts[i - 1] + abs_offset;

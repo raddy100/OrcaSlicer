@@ -8,6 +8,7 @@
 #include <wx/textctrl.h>
 #include <wx/dcclient.h>
 #include <wx/choice.h>
+#include <wx/checkbox.h>
 
 #include "libslic3r/DrawSession.hpp"
 #include "libslic3r/DrawModeFeedback.hpp"
@@ -71,6 +72,8 @@ private:
     wxToggleButton*    m_fill_toggle    { nullptr }; // filled-quad width preview
     wxToggleButton*    m_snap_toggle    { nullptr }; // snap-to-grid (on by default)
     wxChoice*          m_grid_res_choice{ nullptr }; // snap grid resolution selector
+    wxChoice*          m_arc_res_choice { nullptr }; // arc/bezier segment resolution
+    wxCheckBox*        m_native_arc_chk { nullptr }; // emit G2/G3 for circular arcs
     wxToggleButton*    m_measure_toggle { nullptr };
     wxToggleButton*    m_coord_toggle   { nullptr };
     wxTextCtrl*        m_length_input   { nullptr };
@@ -222,6 +225,8 @@ private:
     void on_fill_toggle(wxCommandEvent& evt);
     void on_snap_toggle(wxCommandEvent& evt);
     void on_grid_res_change(wxCommandEvent& evt);
+    void on_arc_res_change(wxCommandEvent& evt);
+    void on_native_arc_toggle(wxCommandEvent& evt);
     void on_measure_toggle(wxCommandEvent& evt);
     void on_coord_toggle(wxCommandEvent& evt);
     void on_length_text(wxCommandEvent& evt);

@@ -19,6 +19,7 @@
 #include <wx/msgdlg.h>
 #include <wx/dcbuffer.h>
 #include <wx/choice.h>
+#include <wx/checkbox.h>
 
 #include <algorithm>
 #include <cmath>
@@ -104,6 +105,24 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
         m_grid_res_choice->SetSelection(4); // default: 0.4 mm
         m_grid_res_choice->SetToolTip("Snap-to-grid resolution");
     }
+    {
+        const wxString arc_choices[] = {
+            "Very Coarse", "Coarse", "Normal", "Fine", "Very Fine"
+        };
+        m_arc_res_choice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxSize(90, -1),
+            5, arc_choices);
+        m_arc_res_choice->SetSelection(3); // default: Fine (0.05 mm tolerance)
+        m_arc_res_choice->SetToolTip(
+            "Arc/curve resolution: controls how many straight G1 segments\n"
+            "approximate each arc or Bezier curve.\n"
+            "Very Coarse = ~3 segs (blocky), Very Fine = ~35 segs (smooth).\n"
+            "Has no effect on straight lines.");
+    }
+    m_native_arc_chk = new wxCheckBox(this, wxID_ANY, "G2/G3");
+    m_native_arc_chk->SetToolTip(
+        "Emit native G2/G3 arc commands for circular arcs\n"
+        "instead of G1 linearization.\n"
+        "Has no effect on Bezier curves or straight lines.");
     m_measure_toggle = new wxToggleButton(this, wxID_ANY, "Show Measurements");
     m_coord_toggle = new wxToggleButton(this, wxID_ANY, "Show Coordinates");
     m_length_input = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(90, -1), wxTE_PROCESS_ENTER);
@@ -141,6 +160,9 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     top_sizer->Add(m_snap_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(new wxStaticText(this, wxID_ANY, "Grid:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_grid_res_choice, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(new wxStaticText(this, wxID_ANY, "Arc:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_arc_res_choice, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_native_arc_chk, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_measure_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_coord_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(new wxStaticText(this, wxID_ANY, "Length:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
@@ -179,6 +201,8 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_fill_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_fill_toggle, this);
     m_snap_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_snap_toggle, this);
     m_grid_res_choice->Bind(wxEVT_CHOICE, &DrawModePanel::on_grid_res_change, this);
+    m_arc_res_choice->Bind(wxEVT_CHOICE,  &DrawModePanel::on_arc_res_change,  this);
+    m_native_arc_chk->Bind(wxEVT_CHECKBOX, &DrawModePanel::on_native_arc_toggle, this);
     m_measure_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_measure_toggle, this);
     m_coord_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_coord_toggle, this);
     m_length_input->Bind(wxEVT_TEXT, &DrawModePanel::on_length_text, this);
@@ -274,6 +298,12 @@ void DrawModePanel::activate(PartPlate* plate)
     if (m_arc_tool_btn)   m_arc_tool_btn->SetValue(false);
     if (m_curve_tool_btn) m_curve_tool_btn->SetValue(false);
 
+    // Reset arc resolution to default (Fine, 0.05 mm tolerance)
+    m_session.curve_tolerance_mm = 0.05;
+    m_session.native_arc_output  = false;
+    if (m_arc_res_choice) m_arc_res_choice->SetSelection(3);
+    if (m_native_arc_chk) m_native_arc_chk->SetValue(false);
+
     if (restore_existing_draw_object(plate))
         return;
 
@@ -340,6 +370,19 @@ void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
     if (m_line_tool_btn)  m_line_tool_btn->SetValue(true);
     if (m_arc_tool_btn)   m_arc_tool_btn->SetValue(false);
     if (m_curve_tool_btn) m_curve_tool_btn->SetValue(false);
+
+    // Sync arc resolution widget to the loaded session's setting.
+    if (m_arc_res_choice) {
+        static const double kArcTolerances[] = { 2.0, 0.5, 0.2, 0.05, 0.01 };
+        int best_idx = 3; // default: Fine
+        double best_diff = std::abs(m_session.curve_tolerance_mm - kArcTolerances[3]);
+        for (int i = 0; i < 5; ++i) {
+            double diff = std::abs(m_session.curve_tolerance_mm - kArcTolerances[i]);
+            if (diff < best_diff) { best_diff = diff; best_idx = i; }
+        }
+        m_arc_res_choice->SetSelection(best_idx);
+    }
+    if (m_native_arc_chk) m_native_arc_chk->SetValue(m_session.native_arc_output);
 
     if (m_plater) {
         const DrawModeDisplayPreferences& prefs = m_plater->model().draw_mode_display_preferences;
@@ -892,7 +935,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
                 if (seg.type == DrawSegmentType::Line) {
                     dc.DrawLine(p1, p2);
                 } else {
-                    auto pts = draw_sample_segment(seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                    auto pts = draw_sample_segment(seg, m_session.curve_tolerance_mm);
                     for (size_t k = 1; k < pts.size(); ++k)
                         dc.DrawLine(plate_to_screen(pts[k-1]), plate_to_screen(pts[k]));
                 }
@@ -908,7 +951,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
                 double hw = m_nozzle_d * 0.5;
                 dc.SetPen(wxPen(wxColour(255, 100, 0), 1));
                 dc.SetBrush(wxBrush(wxColour(200, 75, 0)));
-                auto pts = draw_sample_segment(seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                auto pts = draw_sample_segment(seg, m_session.curve_tolerance_mm);
                 for (size_t k = 1; k < pts.size(); ++k) {
                     Vec2d dv = pts[k] - pts[k-1];
                     double dlen = dv.norm();
@@ -937,7 +980,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
                         dc.DrawCircle(p2, 3);
                     }
                 } else {
-                    auto pts = draw_sample_segment(seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                    auto pts = draw_sample_segment(seg, m_session.curve_tolerance_mm);
                     for (size_t k = 1; k < pts.size(); ++k)
                         dc.DrawLine(plate_to_screen(pts[k-1]), plate_to_screen(pts[k]));
                     if (is_active) {
@@ -989,7 +1032,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
                 dc.DrawCircle(pt, 4); // through-point dot
 
                 DrawSegment preview_seg = DrawSegment::make_arc(start_pos, through, mouse_pos);
-                auto pts = draw_sample_segment(preview_seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                auto pts = draw_sample_segment(preview_seg, m_session.curve_tolerance_mm);
                 dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
                 for (size_t k = 1; k < pts.size(); ++k)
                     dc.DrawLine(plate_to_screen(pts[k-1]), plate_to_screen(pts[k]));
@@ -1032,7 +1075,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
                 dc.DrawLine(pm_draw, pc2);
 
                 DrawSegment preview_seg = DrawSegment::make_bezier(start_pos, ctrl1, ctrl2, mouse_pos);
-                auto pts = draw_sample_segment(preview_seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                auto pts = draw_sample_segment(preview_seg, m_session.curve_tolerance_mm);
                 dc.SetPen(wxPen(wxColour(255, 200, 50), 1, wxPENSTYLE_SHORT_DASH));
                 for (size_t k = 1; k < pts.size(); ++k)
                     dc.DrawLine(plate_to_screen(pts[k-1]), plate_to_screen(pts[k]));
@@ -1116,7 +1159,7 @@ void DrawModePanel::on_canvas_paint(wxPaintEvent&)
             else                  preview.ctrl2 = m_drag_preview;
 
             // Draw the updated arc/bezier preview
-            auto pts = draw_sample_segment(preview, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+            auto pts = draw_sample_segment(preview, m_session.curve_tolerance_mm);
             dc.SetPen(wxPen(wxColour(255, 255, 0), 2, wxPENSTYLE_SHORT_DASH));
             for (size_t k = 1; k < pts.size(); ++k)
                 dc.DrawLine(plate_to_screen(pts[k-1]), plate_to_screen(pts[k]));
@@ -1269,7 +1312,7 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
                     pos, seg.start, seg.end, t);
                 if (d < best_body) { best_body = d; body_seg = si; }
             } else {
-                auto pts = draw_sample_segment(seg, DRAW_MODE_SAMPLE_TOLERANCE_MM);
+                auto pts = draw_sample_segment(seg, m_session.curve_tolerance_mm);
                 for (size_t k = 1; k < pts.size(); ++k) {
                     double t;
                     double d = DrawModeInputHandler::point_to_segment_distance(
@@ -1713,7 +1756,8 @@ bool DrawModePanel::apply_session_to_model(bool reset_after)
 
     Model& model = m_plater->model();
 
-    if (m_editing_obj_idx >= 0 && m_editing_obj_idx < (int)model.objects.size()) {
+    if (m_editing_obj_idx >= 0 && m_editing_obj_idx < (int)model.objects.size()
+            && model.objects[m_editing_obj_idx]->is_draw_path_object()) {
         // Re-edit path: replace mesh and session in place, preserve instances.
         ModelObject* obj = model.objects[m_editing_obj_idx];
 
@@ -1804,7 +1848,11 @@ void DrawModePanel::on_simulate(wxCommandEvent&)
 
 void DrawModePanel::on_finalize(wxCommandEvent&)
 {
-    if (!apply_session_to_model(/*reset_after=*/true)) return;
+    // Keep the session alive (reset_after=false) so that if the user deletes
+    // the generated 3D object from the prepare/preview window, they can still
+    // return to Draw Mode and find their drawing intact.  The drawing is the
+    // master; the 3D mesh is just a derived artifact.
+    if (!apply_session_to_model(/*reset_after=*/false)) return;
 
     // Switch back to 3D Editor tab.
     wxGetApp().mainframe->select_tab((size_t)MainFrame::tp3DEditor);
@@ -1948,6 +1996,20 @@ void DrawModePanel::on_grid_res_change(wxCommandEvent&)
     const bool free_snap     = m_draft.snap_mode == DrawDirectionSnapMode::Free;
     update_draft(m_draft.raw_mouse, diagonal_snap, free_snap);
     if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_arc_res_change(wxCommandEvent&)
+{
+    static const double kArcTolerances[] = { 2.0, 0.5, 0.2, 0.05, 0.01 };
+    const int sel = m_arc_res_choice->GetSelection();
+    if (sel >= 0 && sel < 5)
+        m_session.curve_tolerance_mm = kArcTolerances[sel];
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_native_arc_toggle(wxCommandEvent&)
+{
+    m_session.native_arc_output = m_native_arc_chk->GetValue();
 }
 
 void DrawModePanel::on_measure_toggle(wxCommandEvent&)

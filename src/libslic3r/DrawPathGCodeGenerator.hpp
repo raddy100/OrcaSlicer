@@ -60,6 +60,10 @@ private:
     Vec2d              m_plate_origin;
     PlaceholderParser  m_placeholder_parser;
 
+    // Per-session settings, set from DrawSession before generating layers.
+    double m_curve_tol  { 0.05 };  // max chord-to-curve deviation (mm)
+    bool   m_native_arc { false }; // emit G2/G3 for circular arcs
+
     std::string generate_preamble(const DrawSession& session);
     std::string generate_layer(const DrawLayer& layer, const Vec2d& abs_offset);
     std::string generate_postamble(const DrawSession& session);

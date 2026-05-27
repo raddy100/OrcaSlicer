@@ -88,6 +88,16 @@ struct DrawSession {
     std::vector<DrawLayer> layers;       // in Z order
     int                    active_layer; // index into layers[], -1 if none
 
+    // Max chord-to-curve deviation (mm) when sampling arc/bezier segments into
+    // G1 polylines for G-code output, mesh generation, and canvas rendering.
+    // Smaller = more segments = smoother; default 0.05 matches
+    // DRAW_MODE_SAMPLE_TOLERANCE_MM in DrawModeFeedback.hpp.
+    double curve_tolerance_mm = 0.05;
+
+    // When true, circular arc segments emit native G2/G3 commands instead of
+    // G1 linearization.  Bezier curves always use G1 regardless of this flag.
+    bool native_arc_output = false;
+
     DrawSession() : active_layer(-1) {}
 
     bool   is_empty() const;
