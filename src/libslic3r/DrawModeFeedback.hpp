@@ -90,6 +90,14 @@ double draw_segment_sampled_length(
     const DrawSegment& seg,
     double tolerance_mm = DRAW_MODE_SAMPLE_TOLERANCE_MM);
 
+bool draw_splice_segment(
+    const DrawSegment& seg,
+    const Vec2d& click_pt,
+    double gap_mm,
+    DrawSegment& part_a,
+    DrawSegment& part_b,
+    double tolerance_mm = DRAW_MODE_SAMPLE_TOLERANCE_MM);
+
 // Returns the display length for any segment type.
 // Uses sampling for CircularArc and CubicBezier; simple norm for Line.
 double draw_display_length_mm(const DrawSegment& seg);

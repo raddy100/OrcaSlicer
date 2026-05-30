@@ -2646,6 +2646,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             const pt::ptree& ds_tree = tree.get_child("draw_session");
             session.curve_tolerance_mm = ds_tree.get<double>("<xmlattr>.curve_tolerance_mm", 0.05);
             session.native_arc_output  = ds_tree.get<int>("<xmlattr>.native_arc_output", 0) != 0;
+            session.first_layer_flow_ratio = ds_tree.get<double>("<xmlattr>.first_layer_flow_ratio", 0.90);
+            session.wipe_enabled       = ds_tree.get<int>("<xmlattr>.wipe_enabled", 1) != 0;
+            session.wipe_distance_mm   = ds_tree.get<double>("<xmlattr>.wipe_distance_mm", 1.0);
+            session.coast_distance_mm  = ds_tree.get<double>("<xmlattr>.coast_distance_mm", 0.0);
 
             for (const auto& layer_kv : ds_tree) {
                 if (layer_kv.first != "layer") continue;
@@ -7491,6 +7495,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             root.put("<xmlattr>.layer_count", session.layer_count());
             root.put("<xmlattr>.curve_tolerance_mm", session.curve_tolerance_mm);
             root.put("<xmlattr>.native_arc_output",  session.native_arc_output ? 1 : 0);
+            root.put("<xmlattr>.first_layer_flow_ratio", session.first_layer_flow_ratio);
+            root.put("<xmlattr>.wipe_enabled",      session.wipe_enabled ? 1 : 0);
+            root.put("<xmlattr>.wipe_distance_mm",  session.wipe_distance_mm);
+            root.put("<xmlattr>.coast_distance_mm", session.coast_distance_mm);
 
             for (const DrawLayer& layer : session.layers) {
                 pt::ptree& layer_node = root.add("layer", "");

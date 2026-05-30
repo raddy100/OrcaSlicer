@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace Slic3r {
@@ -440,6 +441,221 @@ double draw_segment_sampled_length(const DrawSegment& seg, double tolerance_mm)
     for (size_t i = 1; i < pts.size(); ++i)
         total += (pts[i] - pts[i - 1]).norm();
     return total;
+}
+
+namespace {
+
+constexpr double SPLICE_MIN_SEGMENT_MM = 1e-3;
+
+Vec2d lerp(Vec2d a, Vec2d b, double t)
+{
+    return a + (b - a) * t;
+}
+
+struct ArcGeometry {
+    Vec2d  center;
+    double radius { 0.0 };
+    double theta_start { 0.0 };
+    double sweep { 0.0 };
+};
+
+bool compute_arc_geometry(const DrawSegment& seg, ArcGeometry& arc)
+{
+    if (!circumcenter_2d(seg.start, seg.ctrl1, seg.end, arc.center))
+        return false;
+
+    arc.radius = (seg.start - arc.center).norm();
+    if (arc.radius < 1e-10)
+        return false;
+
+    arc.theta_start = std::atan2(seg.start.y() - arc.center.y(), seg.start.x() - arc.center.x());
+    const double theta_p = std::atan2(seg.ctrl1.y() - arc.center.y(), seg.ctrl1.x() - arc.center.x());
+    const double theta_e = std::atan2(seg.end.y() - arc.center.y(), seg.end.x() - arc.center.x());
+    const bool ccw = angle_on_ccw_arc(arc.theta_start, theta_p, theta_e);
+
+    if (ccw) {
+        arc.sweep = normalize_angle_2pi(theta_e - arc.theta_start);
+        if (arc.sweep < 1e-12)
+            arc.sweep = 2.0 * PI;
+    } else {
+        arc.sweep = -normalize_angle_2pi(arc.theta_start - theta_e);
+        if (arc.sweep > -1e-12)
+            arc.sweep = -2.0 * PI;
+    }
+    return true;
+}
+
+Vec2d arc_point_at(const ArcGeometry& arc, double s, double total)
+{
+    const double theta = arc.theta_start + (total > 0.0 ? (s / total) * arc.sweep : 0.0);
+    return Vec2d(arc.center.x() + arc.radius * std::cos(theta),
+                 arc.center.y() + arc.radius * std::sin(theta));
+}
+
+double nearest_polyline_arclength(const std::vector<Vec2d>& pts, const Vec2d& click_pt)
+{
+    if (pts.empty())
+        return 0.0;
+
+    double best_dist2 = std::numeric_limits<double>::max();
+    double best_s = 0.0;
+    double cumulative = 0.0;
+
+    for (size_t i = 1; i < pts.size(); ++i) {
+        const Vec2d a = pts[i - 1];
+        const Vec2d b = pts[i];
+        const Vec2d ab = b - a;
+        const double len2 = ab.squaredNorm();
+        double t = 0.0;
+        if (len2 > 1e-20)
+            t = std::clamp((click_pt - a).dot(ab) / len2, 0.0, 1.0);
+        const Vec2d nearest = a + ab * t;
+        const double dist2 = (click_pt - nearest).squaredNorm();
+        const double seg_len = std::sqrt(len2);
+        if (dist2 < best_dist2) {
+            best_dist2 = dist2;
+            best_s = cumulative + seg_len * t;
+        }
+        cumulative += seg_len;
+    }
+
+    if (pts.size() == 1)
+        return 0.0;
+    return best_s;
+}
+
+void clamp_splice_cuts(double total, double gap_mm, double& s_center, double& cut_a, double& cut_b)
+{
+    const double half_gap = gap_mm * 0.5;
+    const double min_len = SPLICE_MIN_SEGMENT_MM + 1e-12;
+    s_center = std::clamp(s_center, half_gap + min_len, total - half_gap - min_len);
+    cut_a = s_center - half_gap;
+    cut_b = s_center + half_gap;
+}
+
+Vec2d bezier_point_at(Vec2d p0, Vec2d p1, Vec2d p2, Vec2d p3, double t)
+{
+    const Vec2d m01 = lerp(p0, p1, t);
+    const Vec2d m12 = lerp(p1, p2, t);
+    const Vec2d m23 = lerp(p2, p3, t);
+    const Vec2d m012 = lerp(m01, m12, t);
+    const Vec2d m123 = lerp(m12, m23, t);
+    return lerp(m012, m123, t);
+}
+
+double bezier_t_at_arclength(const std::vector<double>& cumulative, double target_s)
+{
+    if (cumulative.empty() || target_s <= 0.0)
+        return 0.0;
+    if (target_s >= cumulative.back())
+        return 1.0;
+
+    auto it = std::lower_bound(cumulative.begin(), cumulative.end(), target_s);
+    const size_t idx = static_cast<size_t>(std::distance(cumulative.begin(), it));
+    if (idx == 0)
+        return 0.0;
+
+    const double s0 = cumulative[idx - 1];
+    const double s1 = cumulative[idx];
+    const double local = (s1 > s0) ? (target_s - s0) / (s1 - s0) : 0.0;
+    return (static_cast<double>(idx - 1) + local) / 256.0;
+}
+
+} // namespace
+
+bool draw_splice_segment(const DrawSegment& seg, const Vec2d& click_pt, double gap_mm,
+                         DrawSegment& part_a, DrawSegment& part_b, double tolerance_mm)
+{
+    gap_mm = std::max(0.0, gap_mm);
+    if (tolerance_mm <= 0.0)
+        tolerance_mm = DRAW_MODE_SAMPLE_TOLERANCE_MM;
+
+    if (seg.type == DrawSegmentType::Line) {
+        const double total = (seg.end - seg.start).norm();
+        if (total <= gap_mm + 2.0 * SPLICE_MIN_SEGMENT_MM)
+            return false;
+
+        const Vec2d dir = (seg.end - seg.start) / total;
+        double s_center = std::clamp((click_pt - seg.start).dot(dir), 0.0, total);
+        double cut_a = 0.0;
+        double cut_b = 0.0;
+        clamp_splice_cuts(total, gap_mm, s_center, cut_a, cut_b);
+
+        part_a = DrawSegment::make_line(seg.start, seg.start + dir * cut_a, seg.is_travel);
+        part_b = DrawSegment::make_line(seg.start + dir * cut_b, seg.end, seg.is_travel);
+        return true;
+    }
+
+    if (seg.type == DrawSegmentType::CircularArc) {
+        ArcGeometry arc;
+        if (!compute_arc_geometry(seg, arc)) {
+            const DrawSegment line_fallback = DrawSegment::make_line(seg.start, seg.end, seg.is_travel);
+            return draw_splice_segment(line_fallback, click_pt, gap_mm, part_a, part_b, tolerance_mm);
+        }
+
+        const double total = std::abs(arc.sweep) * arc.radius;
+        if (total <= gap_mm + 2.0 * SPLICE_MIN_SEGMENT_MM)
+            return false;
+
+        const std::vector<Vec2d> pts = sample_arc(seg.start, seg.ctrl1, seg.end, tolerance_mm);
+        const double sampled_total = draw_segment_sampled_length(seg, tolerance_mm);
+        double s_center = nearest_polyline_arclength(pts, click_pt);
+        if (sampled_total > 1e-12)
+            s_center *= total / sampled_total;
+        s_center = std::clamp(s_center, 0.0, total);
+
+        double cut_a = 0.0;
+        double cut_b = 0.0;
+        clamp_splice_cuts(total, gap_mm, s_center, cut_a, cut_b);
+
+        const Vec2d a_end = arc_point_at(arc, cut_a, total);
+        const Vec2d b_start = arc_point_at(arc, cut_b, total);
+        part_a = DrawSegment::make_arc(seg.start, arc_point_at(arc, cut_a * 0.5, total), a_end, seg.is_travel);
+        part_b = DrawSegment::make_arc(b_start, arc_point_at(arc, (cut_b + total) * 0.5, total), seg.end, seg.is_travel);
+        return true;
+    }
+
+    constexpr int BEZIER_SAMPLES = 256;
+    std::vector<Vec2d> pts;
+    std::vector<double> cumulative;
+    pts.reserve(BEZIER_SAMPLES + 1);
+    cumulative.reserve(BEZIER_SAMPLES + 1);
+    pts.push_back(seg.start);
+    cumulative.push_back(0.0);
+    for (int i = 1; i <= BEZIER_SAMPLES; ++i) {
+        const double t = static_cast<double>(i) / static_cast<double>(BEZIER_SAMPLES);
+        pts.push_back(bezier_point_at(seg.start, seg.ctrl1, seg.ctrl2, seg.end, t));
+        cumulative.push_back(cumulative.back() + (pts.back() - pts[pts.size() - 2]).norm());
+    }
+
+    const double total = cumulative.back();
+    if (total <= gap_mm + 2.0 * SPLICE_MIN_SEGMENT_MM)
+        return false;
+
+    double s_center = nearest_polyline_arclength(pts, click_pt);
+    s_center = std::clamp(s_center, 0.0, total);
+    double cut_a = 0.0;
+    double cut_b = 0.0;
+    clamp_splice_cuts(total, gap_mm, s_center, cut_a, cut_b);
+
+    const double t1 = bezier_t_at_arclength(cumulative, cut_a);
+    const double t2 = bezier_t_at_arclength(cumulative, cut_b);
+
+    const Vec2d a1 = lerp(seg.start, seg.ctrl1, t1);
+    const Vec2d m12_a = lerp(seg.ctrl1, seg.ctrl2, t1);
+    const Vec2d a2 = lerp(a1, m12_a, t1);
+    const Vec2d a3 = bezier_point_at(seg.start, seg.ctrl1, seg.ctrl2, seg.end, t1);
+
+    const Vec2d m01_b = lerp(seg.start, seg.ctrl1, t2);
+    const Vec2d m12_b = lerp(seg.ctrl1, seg.ctrl2, t2);
+    const Vec2d m23_b = lerp(seg.ctrl2, seg.end, t2);
+    const Vec2d m012_b = lerp(m01_b, m12_b, t2);
+    const Vec2d m123_b = lerp(m12_b, m23_b, t2);
+    const Vec2d m0123_b = lerp(m012_b, m123_b, t2);
+
+    part_a = DrawSegment::make_bezier(seg.start, a1, a2, a3, seg.is_travel);
+    part_b = DrawSegment::make_bezier(m0123_b, m123_b, m23_b, seg.end, seg.is_travel);
+    return true;
 }
 
 double draw_display_length_mm(const DrawSegment& seg)

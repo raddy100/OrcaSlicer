@@ -98,6 +98,25 @@ struct DrawSession {
     // G1 linearization.  Bezier curves always use G1 regardless of this flag.
     bool native_arc_output = false;
 
+    // Elephant's-foot mitigation for Draw Mode. Scales the extrusion amount (E)
+    // of the first layer (layer_index == 0) only; the XY toolpath is never moved,
+    // so drawn lengths/positions stay accurate. The slightly starved bottom bead
+    // has less material to bulge sideways. 1.0 = no reduction; default 0.90 (90%).
+    double first_layer_flow_ratio = 0.90;
+
+    // Anti-blob wipe: before each retract, move the nozzle backward along the
+    // just-printed segment (no extrusion) so the end-of-path pressure bleeds out
+    // over the toolpath instead of forming a blob at the seam point. The total
+    // retraction length is unchanged; only WHERE retraction happens shifts.
+    bool   wipe_enabled = true;       // wipe backward along last segment while retracting (anti-blob)
+    double wipe_distance_mm = 1.0;    // length of the wipe move (clamped to segment length)
+
+    // Optional coasting: stop extruding this many mm before the end of a segment
+    // and travel the remainder dry, letting residual nozzle pressure finish the
+    // bead. Incompatible with firmware pressure/linear advance — keep at 0 (off)
+    // when PA is enabled. 0 = disabled (byte-identical to the no-coast baseline).
+    double coast_distance_mm = 0.0;   // stop extruding this many mm early; PA-incompatible; 0 = off
+
     DrawSession() : active_layer(-1) {}
 
     bool   is_empty() const;

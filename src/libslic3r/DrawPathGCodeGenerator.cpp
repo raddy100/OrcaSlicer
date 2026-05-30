@@ -57,8 +57,10 @@ DrawPathGCodeGenerator::DrawPathGCodeGenerator(const DynamicPrintConfig& full_co
 std::string DrawPathGCodeGenerator::generate(const DrawSession& session,
                                               const Vec2d&       instance_offset)
 {
-    if (session.is_empty())
+    if (session.is_empty()) {
+        m_pending_wipe.reset();
         return generate_preamble(session) + generate_postamble(session);
+    }
 
     // Total XY offset to convert plate-relative → absolute machine coords.
     const Vec2d abs_offset = m_plate_origin + instance_offset;
@@ -66,6 +68,11 @@ std::string DrawPathGCodeGenerator::generate(const DrawSession& session,
     // Capture per-session settings before generating layers.
     m_curve_tol  = session.curve_tolerance_mm;
     m_native_arc = session.native_arc_output;
+    m_first_layer_flow_ratio = std::clamp(session.first_layer_flow_ratio, 0.1, 1.5);
+    m_wipe_enabled      = session.wipe_enabled;
+    m_wipe_distance_mm  = std::max(0.0, session.wipe_distance_mm);
+    m_coast_distance_mm = std::max(0.0, session.coast_distance_mm);
+    m_pending_wipe.reset();
 
     std::string gcode;
     gcode.reserve(1024 * 64);
@@ -95,6 +102,7 @@ std::string DrawPathGCodeGenerator::generate_batch(const std::vector<BatchItem>&
 
     if (!first_nonempty) {
         // All empty — still emit preamble + postamble.
+        m_pending_wipe.reset();
         DrawSession empty;
         gcode += generate_preamble(empty);
         gcode += generate_postamble(empty);
@@ -108,6 +116,11 @@ std::string DrawPathGCodeGenerator::generate_batch(const std::vector<BatchItem>&
         // Update per-session settings for this batch item's layers.
         m_curve_tol  = sess->curve_tolerance_mm;
         m_native_arc = sess->native_arc_output;
+        m_first_layer_flow_ratio = std::clamp(sess->first_layer_flow_ratio, 0.1, 1.5);
+        m_wipe_enabled      = sess->wipe_enabled;
+        m_wipe_distance_mm  = std::max(0.0, sess->wipe_distance_mm);
+        m_coast_distance_mm = std::max(0.0, sess->coast_distance_mm);
+        m_pending_wipe.reset();
         const Vec2d abs_offset = m_plate_origin + inst_offset;
         for (const DrawLayer& layer : sess->layers) {
             gcode += generate_layer(layer, abs_offset);
@@ -287,6 +300,132 @@ std::string DrawPathGCodeGenerator::generate_preamble(const DrawSession& session
 }
 
 // ---------------------------------------------------------------------------
+// Private: anti-blob wipe helpers
+// ---------------------------------------------------------------------------
+
+Vec2d DrawPathGCodeGenerator::clamp_to_printable_area(const Vec2d& pt) const
+{
+    const auto* printable_area = dynamic_cast<const ConfigOptionPoints*>(m_config.option("printable_area"));
+    if (!printable_area || printable_area->values.empty())
+        return pt;
+
+    double min_x = printable_area->values.front().x();
+    double min_y = printable_area->values.front().y();
+    double max_x = min_x;
+    double max_y = min_y;
+    for (const Vec2d& p : printable_area->values) {
+        min_x = std::min(min_x, p.x());
+        min_y = std::min(min_y, p.y());
+        max_x = std::max(max_x, p.x());
+        max_y = std::max(max_y, p.y());
+    }
+    return Vec2d(std::clamp(pt.x(), min_x, max_x), std::clamp(pt.y(), min_y, max_y));
+}
+
+std::optional<DrawPathGCodeGenerator::WipeGeometry>
+DrawPathGCodeGenerator::compute_wipe_geometry(const DrawSegment& seg, const Vec2d& abs_offset) const
+{
+    constexpr double kEps = 1e-9;
+
+    const Vec2d abs_end = seg.end + abs_offset;
+
+    // Reversed direction at the segment end (points backward along the segment).
+    Vec2d dir;
+    switch (seg.type) {
+    case DrawSegmentType::Line:
+        dir = seg.start - seg.end;
+        break;
+    case DrawSegmentType::CubicBezier:
+        dir = seg.ctrl2 - seg.end; // reversed end tangent
+        break;
+    case DrawSegmentType::CircularArc: {
+        // Circumcenter from start / through-point (ctrl1) / end — same math as the
+        // native-arc branch of generate_layer().
+        const Vec2d  S = seg.start, P = seg.ctrl1, E = seg.end;
+        const double ax = S.x(), ay = S.y();
+        const double bx = P.x(), by = P.y();
+        const double cx = E.x(), cy = E.y();
+        const double D  = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+        if (std::abs(D) < 1e-10) {
+            // Collinear fallback: treat as a chord.
+            dir = seg.start - seg.end;
+        } else {
+            const double sa = ax * ax + ay * ay;
+            const double sb = bx * bx + by * by;
+            const double sc = cx * cx + cy * cy;
+            const Vec2d  center(
+                (sa * (by - cy) + sb * (cy - ay) + sc * (ay - by)) / D,
+                (sa * (cx - bx) + sb * (ax - cx) + sc * (bx - ax)) / D);
+            const Vec2d  r = E - center; // end radius
+            const double cross = (P.x() - S.x()) * (E.y() - S.y())
+                               - (P.y() - S.y()) * (E.x() - S.x());
+            const bool   is_ccw = (cross > 0.0);
+            // Forward tangent at end is perpendicular to the radius; reverse it
+            // so the wipe travels backward along the arc.
+            const Vec2d  fwd = is_ccw ? Vec2d(-r.y(), r.x()) : Vec2d(r.y(), -r.x());
+            dir = -fwd;
+        }
+        break;
+    }
+    default:
+        dir = seg.start - seg.end;
+        break;
+    }
+
+    const double n = dir.norm();
+    if (n < kEps)
+        return std::nullopt; // degenerate / zero-length => no wipe
+    dir /= n;
+
+    const double seg_len = draw_segment_sampled_length(seg, m_curve_tol);
+    if (seg_len < kEps)
+        return std::nullopt;
+
+    const double distance = std::min(m_wipe_distance_mm, seg_len);
+    if (distance < kEps)
+        return std::nullopt;
+
+    Vec2d end_pt = abs_end + dir * distance;
+    end_pt = clamp_to_printable_area(end_pt);
+
+    return WipeGeometry{ end_pt, dir, distance };
+}
+
+std::string DrawPathGCodeGenerator::retract_with_optional_wipe()
+{
+    // No pending extrusion or wipe disabled => behave exactly like before.
+    if (!m_wipe_enabled || !m_pending_wipe.has_value())
+        return m_writer.retract();
+
+    const PendingWipe pending = *m_pending_wipe;
+    m_pending_wipe.reset();
+
+    // Only wipe if the head is still sitting at the end of that extrusion.
+    const Vec3d& cur = m_writer.get_position();
+    const bool at_end =
+        std::abs(cur.x() - pending.abs_end.x()) < 0.001 &&
+        std::abs(cur.y() - pending.abs_end.y()) < 0.001;
+
+    std::optional<WipeGeometry> wipe = at_end
+        ? compute_wipe_geometry(pending.seg, pending.abs_offset)
+        : std::nullopt;
+    if (!wipe.has_value())
+        return m_writer.retract();
+
+    std::string out;
+    // Partial retract done before the wipe (retract_before_wipe fraction). With
+    // the default 100% this is the full retraction; with 0% nothing is emitted
+    // here and all retraction happens after the wipe.
+    out += m_writer.retract(/*before_wipe=*/true);
+    // Wipe travel move backward along the segment — no extrusion. Use travel_to_xy
+    // so the "wipe" comment is preserved (travel_to_xyz drops it on same-Z moves).
+    out += m_writer.travel_to_xy(wipe->end_pt, "wipe");
+    // Remaining retraction so the net retracted length matches a plain retract().
+    out += m_writer.retract();
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Private: per-layer
 // ---------------------------------------------------------------------------
 
@@ -305,6 +444,10 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
     out += m_writer.set_fan(static_cast<unsigned int>(calc_fan_speed_pct(layer.layer_index)));
 
     const bool is_first = (layer.layer_index == 0);
+
+    // Elephant's-foot mitigation: starve only the first layer's extrusion so the
+    // bottom bead has less material to bulge sideways. XY toolpath is unchanged.
+    m_layer_flow_mult = is_first ? m_first_layer_flow_ratio : 1.0;
 
     // Temperature for this layer.
     const int temp = is_first
@@ -339,8 +482,8 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
             std::abs(cur.z() - layer_z)       > 0.001;
 
         if (seg.is_travel) {
-            // Travel segment: retract, visit sampled waypoints without extruding, unretract.
-            out += m_writer.retract();
+            // Travel segment: retract (optionally wiping first), visit sampled waypoints, unretract.
+            out += retract_with_optional_wipe();
             if (need_reposition)
                 out += m_writer.travel_to_xyz(Vec3d(abs_start.x(), abs_start.y(), layer_z), "to travel-src");
 
@@ -360,18 +503,33 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
         } else {
             // Extrusion segment: position head at abs_start if needed, then extrude.
             if (need_reposition) {
-                out += m_writer.retract();
+                out += retract_with_optional_wipe();
                 out += m_writer.travel_to_xyz(Vec3d(abs_start.x(), abs_start.y(), layer_z), "to seg start");
                 out += m_writer.unretract();
             }
 
-            if (seg.type == DrawSegmentType::Line) {
-                // Standard G1 extrusion.
-                const double dE = calc_extrusion(seg.length());
-                out += m_writer.extrude_to_xyz(
-                    Vec3d(abs_end.x(), abs_end.y(), layer_z), dE, "draw extrude");
+            const bool coast_on = (m_coast_distance_mm > 1e-9);
 
-            } else if (seg.type == DrawSegmentType::CircularArc && native_arc_mode) {
+            if (seg.type == DrawSegmentType::Line) {
+                const double seg_len = seg.length();
+                if (coast_on && seg_len > m_coast_distance_mm + 1e-6) {
+                    // Coasting: extrude up to coast_distance_mm before the end, then
+                    // travel the remainder dry so residual pressure finishes the bead.
+                    const Vec2d  dir       = (seg.end - seg.start).normalized();
+                    const double extr_len  = seg_len - m_coast_distance_mm;
+                    const Vec2d  coast_from = seg.start + dir * extr_len + abs_offset;
+                    const double dE = calc_extrusion(extr_len);
+                    out += m_writer.extrude_to_xyz(
+                        Vec3d(coast_from.x(), coast_from.y(), layer_z), dE, "draw extrude");
+                    out += m_writer.travel_to_xy(abs_end, "coast");
+                } else {
+                    // Standard G1 extrusion.
+                    const double dE = calc_extrusion(seg_len);
+                    out += m_writer.extrude_to_xyz(
+                        Vec3d(abs_end.x(), abs_end.y(), layer_z), dE, "draw extrude");
+                }
+
+            } else if (seg.type == DrawSegmentType::CircularArc && native_arc_mode && !coast_on) {
                 // Native arc mode: try G2/G3.
                 // Compute circumcenter in segment (plate-relative) coordinates.
                 const Vec2d S = seg.start;
@@ -418,16 +576,47 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
             } else {
                 // Compatibility mode for arcs, or any bezier: G1 linearization.
                 const std::vector<Vec2d> pts = draw_sample_segment(seg, m_curve_tol);
-                for (size_t i = 1; i < pts.size(); ++i) {
-                    const Vec2d abs_pt  = pts[i]     + abs_offset;
-                    const Vec2d abs_prev = pts[i - 1] + abs_offset;
-                    const double chord = (pts[i] - pts[i - 1]).norm();
-                    const double dE    = calc_extrusion(chord);
-                    out += m_writer.extrude_to_xyz(
-                        Vec3d(abs_pt.x(), abs_pt.y(), layer_z), dE, "draw extrude");
-                    (void)abs_prev; // used implicitly through previous writer position
+                if (coast_on) {
+                    // Drop the trailing coast_distance_mm of the polyline: extrude up
+                    // to the coast point, then travel the remaining samples dry.
+                    double total = 0.0;
+                    for (size_t i = 1; i < pts.size(); ++i)
+                        total += (pts[i] - pts[i - 1]).norm();
+                    double budget = std::max(0.0, total - m_coast_distance_mm); // length still extruded
+                    for (size_t i = 1; i < pts.size(); ++i) {
+                        const double chord = (pts[i] - pts[i - 1]).norm();
+                        if (budget >= chord - 1e-9) {
+                            const Vec2d abs_pt = pts[i] + abs_offset;
+                            out += m_writer.extrude_to_xyz(
+                                Vec3d(abs_pt.x(), abs_pt.y(), layer_z), calc_extrusion(chord), "draw extrude");
+                            budget -= chord;
+                        } else if (budget > 1e-9) {
+                            // Split this chord: extrude the head portion, travel the tail.
+                            const Vec2d dir = (pts[i] - pts[i - 1]).normalized();
+                            const Vec2d split = pts[i - 1] + dir * budget + abs_offset;
+                            out += m_writer.extrude_to_xyz(
+                                Vec3d(split.x(), split.y(), layer_z), calc_extrusion(budget), "draw extrude");
+                            const Vec2d abs_pt = pts[i] + abs_offset;
+                            out += m_writer.travel_to_xy(abs_pt, "coast");
+                            budget = 0.0;
+                        } else {
+                            const Vec2d abs_pt = pts[i] + abs_offset;
+                            out += m_writer.travel_to_xy(abs_pt, "coast");
+                        }
+                    }
+                } else {
+                    for (size_t i = 1; i < pts.size(); ++i) {
+                        const Vec2d abs_pt  = pts[i]     + abs_offset;
+                        const double chord = (pts[i] - pts[i - 1]).norm();
+                        const double dE    = calc_extrusion(chord);
+                        out += m_writer.extrude_to_xyz(
+                            Vec3d(abs_pt.x(), abs_pt.y(), layer_z), dE, "draw extrude");
+                    }
                 }
             }
+
+            // Remember this extrusion so the next retract can wipe backward along it.
+            m_pending_wipe = PendingWipe{ seg, abs_offset, Vec3d(abs_end.x(), abs_end.y(), layer_z) };
         }
     }
 
@@ -469,7 +658,9 @@ std::string DrawPathGCodeGenerator::generate_postamble(const DrawSession& sessio
 {
     std::string out;
 
-    out += m_writer.retract();
+    // Wipe backward along the final extrusion (if any) before the closing retract
+    // so the print does not end in a blob, then retract and lift as before.
+    out += retract_with_optional_wipe();
 
     // Lift nozzle 10 mm above current position.
     const Vec3d& pos = m_writer.get_position();
@@ -674,7 +865,8 @@ double DrawPathGCodeGenerator::calc_extrusion(double segment_length_mm) const
     const double filament_area   = M_PI * filament_radius * filament_radius;
     const double extrusion_area  = nozzle_d * layer_h; // rectangle approximation
     const double E_per_mm        = extrusion_area / filament_area * flow_ratio;
-    return E_per_mm * segment_length_mm;
+    // m_layer_flow_mult applies the per-layer elephant's-foot reduction (1.0 except layer 0).
+    return E_per_mm * segment_length_mm * m_layer_flow_mult;
 }
 
 // ---------------------------------------------------------------------------

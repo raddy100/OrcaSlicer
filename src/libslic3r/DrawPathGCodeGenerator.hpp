@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <optional>
 #include "DrawSession.hpp"
 #include "GCodeWriter.hpp"
 #include "PlaceholderParser.hpp"
@@ -64,6 +65,53 @@ private:
     double m_curve_tol  { 0.05 };  // max chord-to-curve deviation (mm)
     bool   m_native_arc { false }; // emit G2/G3 for circular arcs
 
+    // Elephant's-foot mitigation: layer-0 extrusion scale (1.0 = no reduction).
+    // Set per-session (clamped); m_layer_flow_mult is the value applied to the
+    // layer currently being generated (m_first_layer_flow_ratio on layer 0, else 1.0).
+    double m_first_layer_flow_ratio { 0.90 };
+    double m_layer_flow_mult        { 1.0 };
+
+    // Anti-blob wipe + optional coasting settings, captured per-session.
+    bool   m_wipe_enabled     { true };
+    double m_wipe_distance_mm { 1.0 };
+    double m_coast_distance_mm{ 0.0 };
+
+public:
+    // Geometry of a wipe move computed from the last extruded segment.
+    struct WipeGeometry {
+        Vec2d  end_pt;    // absolute wipe endpoint (clamped to segment length and plate bounds)
+        Vec2d  dir;       // reversed unit direction (points backward along the segment)
+        double distance;  // actual wipe distance after clamping (mm)
+    };
+
+    // Given the last EXTRUDED segment and the absolute XY offset applied to it,
+    // returns the reversed unit direction at the segment end and a wipe endpoint
+    // clamped to min(wipe_distance_mm, effective segment length) and to the
+    // printable area. Returns std::nullopt for degenerate / zero-length segments
+    // (i.e. "no wipe"). Direction by type:
+    //   Line:        (start - end)
+    //   CubicBezier: (ctrl2 - end)            (reversed end tangent)
+    //   CircularArc: negated tangent at end   (perpendicular to the end radius)
+    std::optional<WipeGeometry> compute_wipe_geometry(const DrawSegment& seg, const Vec2d& abs_offset) const;
+
+private:
+    // Clamp an absolute XY point to the configured printable_area bounding box.
+    Vec2d  clamp_to_printable_area(const Vec2d& pt) const;
+
+    // Pending wipe state: set after every extrusion segment, consumed by the next
+    // retract (in generate_layer or generate_postamble) and then cleared.
+    struct PendingWipe {
+        DrawSegment seg;        // the last extruded segment (plate-relative)
+        Vec2d       abs_offset; // absolute XY offset applied to it
+        Vec3d       abs_end;    // absolute position of the segment end (head sits here)
+    };
+    std::optional<PendingWipe> m_pending_wipe;
+
+    // Emit a retract, optionally preceded by an anti-blob wipe of the pending
+    // extrusion. Order (matching OrcaSlicer): partial retract (retract_before_wipe
+    // fraction) -> wipe travel move (no extrusion) -> remaining retract. The net
+    // retraction length is identical to a plain retract(); only its split moves.
+    std::string retract_with_optional_wipe();
     std::string generate_preamble(const DrawSession& session);
     std::string generate_layer(const DrawLayer& layer, const Vec2d& abs_offset);
     std::string generate_postamble(const DrawSession& session);

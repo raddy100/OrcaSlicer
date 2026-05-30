@@ -1,6 +1,8 @@
 #include <catch2/catch_all.hpp>
 #include "libslic3r/DrawPathGCodeGenerator.hpp"
 #include "libslic3r/DrawSession.hpp"
+#include "libslic3r/DrawModeFeedback.hpp"   // draw_splice_segment, draw_segment_sampled_length
+#include "slic3r/GUI/DrawModeCommands.hpp"  // SpliceSegmentCommand (header-only)
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -9,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <cstdlib>
@@ -156,6 +159,7 @@ TEST_CASE("DrawPathGCodeGenerator: extrusion math matches PRD formula", "[DrawPa
 
     DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
     DrawSession session;
+    session.first_layer_flow_ratio = 1.0; // isolate base extrusion formula from elephant's-foot default
     session.add_layer(0.2);
     DrawLayer& l = session.layers.back();
     DrawSegment seg; seg.start = Vec2d(0, 0); seg.end = Vec2d(10, 0); seg.is_travel = false;
@@ -1124,7 +1128,9 @@ TEST_CASE("DrawPathGCodeGenerator: compat mode arc extrusion total matches arc l
 
     DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/false);
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
-    const std::string gcode = gen.generate(make_ccw_arc_session());
+    DrawSession arc_session = make_ccw_arc_session();
+    arc_session.first_layer_flow_ratio = 1.0; // isolate base extrusion from elephant's-foot default
+    const std::string gcode = gen.generate(arc_session);
 
     // E is absolute: the total extrusion for the arc is the maximum E seen
     // across all G1 lines (which is the last cumulative E before retraction).
@@ -1378,5 +1384,751 @@ TEST_CASE("DrawPathGCodeGenerator: no fan when fan_max_speed=0", "[FanRamp]")
         auto val = extract_layer_fan_speed(gcode, i);
         REQUIRE(val.has_value());
         REQUIRE(*val == 0);
+    }
+}
+
+// ===========================================================================
+// Splice feature: G-code-level print-order validation
+// ---------------------------------------------------------------------------
+// These tests exercise the full pipeline: draw_splice_segment() (geometry) +
+// SpliceSegmentCommand (print-order mutation) + DrawPathGCodeGenerator
+// (G-code emission). The core requirement is that the two spliced halves print
+// CONSECUTIVELY with a retract/travel reposition between them (the physical
+// gap), and that overall print order is preserved end-to-end.
+// ===========================================================================
+
+namespace {
+
+// One parsed extrusion-target record (absolute coordinates, line index in the
+// emitted G-code, and the comment annotation the generator attached).
+struct ExtrudeMove {
+    std::size_t line_no;   // 0-based index into the split G-code lines
+    double      x;
+    double      y;
+    double      e;         // absolute E on this line (use_relative_e_distances=false)
+    std::string comment;   // text after "; " on the line (may be empty)
+};
+
+static std::vector<std::string> split_lines(const std::string& gcode)
+{
+    std::vector<std::string> lines;
+    std::size_t pos = 0;
+    while (pos <= gcode.size()) {
+        std::size_t nl = gcode.find('\n', pos);
+        if (nl == std::string::npos) { lines.push_back(gcode.substr(pos)); break; }
+        lines.push_back(gcode.substr(pos, nl - pos));
+        pos = nl + 1;
+    }
+    return lines;
+}
+
+static std::string line_comment(const std::string& line)
+{
+    auto c = line.find(';');
+    if (c == std::string::npos) return "";
+    std::string s = line.substr(c + 1);
+    // trim leading spaces
+    std::size_t i = s.find_first_not_of(' ');
+    return (i == std::string::npos) ? "" : s.substr(i);
+}
+
+// Collect, in emission order, every positive-extrusion G1 move (a draw extrude
+// for a Line segment), with its target XY and absolute E.
+static std::vector<ExtrudeMove> collect_extrude_moves(const std::vector<std::string>& lines)
+{
+    std::vector<ExtrudeMove> moves;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        const std::string& ln = lines[i];
+        if (ln.rfind("G1 ", 0) != 0) continue;
+        auto ex = extract_axis_value(ln, 'E');
+        auto xx = extract_axis_value(ln, 'X');
+        auto yy = extract_axis_value(ln, 'Y');
+        if (!ex || !xx || !yy) continue;   // need an XY move that also carries E
+        if (*ex <= 0.0) continue;          // skip retraction (negative E) lines
+        moves.push_back({ i, *xx, *yy, *ex, line_comment(ln) });
+    }
+    return moves;
+}
+
+// True if, between line indices [from, to), there is a reposition that proves a
+// new extrusion path was started: a retract (negative-E G1 with "retract"
+// comment) AND a "to seg start" travel move.
+// Detects a gap reposition between two extrusion moves spanning line indices
+// [from, to): there must be a retract, a non-extruding XY travel move (the
+// reposition across the physical gap), and an unretract. Travels that don't
+// change Z route through GCodeWriter::travel_to_xy and therefore carry no
+// comment, so we detect a travel structurally: a G0/G1 move with an X target
+// but NO E word (i.e. it extrudes nothing).
+struct Reposition {
+    bool   retract   = false;
+    bool   travel    = false;
+    bool   unretract = false;
+    double travel_x  = std::numeric_limits<double>::quiet_NaN();
+    bool   ok() const { return retract && travel && unretract; }
+};
+
+static Reposition find_reposition_between(const std::vector<std::string>& lines,
+                                          std::size_t from, std::size_t to)
+{
+    Reposition r;
+    for (std::size_t i = from; i < to && i < lines.size(); ++i) {
+        const std::string& ln = lines[i];
+        const std::string  cm = line_comment(ln);
+        // Retract: comment "retract" (not "unretract"), or a negative-E move.
+        const auto e = extract_axis_value(ln, 'E');
+        if ((cm.find("retract") != std::string::npos && cm.find("unretract") == std::string::npos) ||
+            (e && *e < 0.0))
+            r.retract = true;
+        if (cm.find("unretract") != std::string::npos)
+            r.unretract = true;
+        // Non-extruding XY travel move (no E word, but has an X target).
+        if ((ln.rfind("G1 ", 0) == 0 || ln.rfind("G0 ", 0) == 0)) {
+            const auto x = extract_axis_value(ln, 'X');
+            if (x && !e) { r.travel = true; r.travel_x = *x; }
+        }
+    }
+    return r;
+}
+
+// Build a flat 3-collinear-line layer at y=20, x: 20->30->40->50.
+// Segment index 1 (30->40) is the one we splice.
+static DrawSession make_three_line_session()
+{
+    DrawSession session;
+    session.add_layer(0.2);
+    session.active_layer = 0;
+    DrawLayer& l = session.layers.back();
+    l.segments.push_back(DrawSegment::make_line(Vec2d(20.0, 20.0), Vec2d(30.0, 20.0), false));
+    l.segments.push_back(DrawSegment::make_line(Vec2d(30.0, 20.0), Vec2d(40.0, 20.0), false));
+    l.segments.push_back(DrawSegment::make_line(Vec2d(40.0, 20.0), Vec2d(50.0, 20.0), false));
+    return session;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// CORE: spliced halves print consecutively with a reposition between them, and
+// overall print order is preserved end-to-end.
+// ---------------------------------------------------------------------------
+TEST_CASE("Splice: G-code emits two consecutive extrusion paths with a gap reposition", "[Splice]")
+{
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    DrawSession session = make_three_line_session();
+    session.first_layer_flow_ratio = 1.0; // isolate base extrusion formula from elephant's-foot default
+
+    // Splice the middle segment (index 1) at its midpoint with a 2 mm gap.
+    const DrawSegment original = session.layers[0].segments[1];
+    DrawSegment part_a, part_b;
+    REQUIRE(draw_splice_segment(original, Vec2d(35.0, 20.0), 2.0, part_a, part_b));
+    REQUIRE_FALSE(part_a.is_travel);
+    REQUIRE_FALSE(part_b.is_travel);
+    // Physical gap between the two halves equals the grid size (2 mm).
+    REQUIRE_THAT((part_b.start - part_a.end).norm(), Catch::Matchers::WithinAbs(2.0, 1e-6));
+
+    Slic3r::GUI::SpliceSegmentCommand cmd(0, 1, original, part_a, part_b);
+    cmd.execute(session);
+    REQUIRE(session.layers[0].segments.size() == 4);
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+    const std::vector<std::string> lines = split_lines(gcode);
+
+    const std::vector<ExtrudeMove> moves = collect_extrude_moves(lines);
+    // Exactly four extrusion endpoints: seg0(30), part_a(34), part_b(40), seg2(50).
+    REQUIRE(moves.size() == 4);
+
+    // Print order preserved end-to-end: strictly increasing X in draw order.
+    REQUIRE_THAT(moves[0].x, Catch::Matchers::WithinAbs(30.0, 1e-6)); // seg0 end
+    REQUIRE_THAT(moves[1].x, Catch::Matchers::WithinAbs(34.0, 1e-6)); // part_a end
+    REQUIRE_THAT(moves[2].x, Catch::Matchers::WithinAbs(40.0, 1e-6)); // part_b end
+    REQUIRE_THAT(moves[3].x, Catch::Matchers::WithinAbs(50.0, 1e-6)); // seg2 end (after part_b)
+
+    // The two halves are CONSECUTIVE (no third extrusion interleaved) AND there
+    // is a retract + non-extruding travel + unretract between part_a's extrude
+    // and part_b's extrude — i.e. they are emitted as TWO SEPARATE paths with a
+    // physical-gap reposition between them.
+    {
+        std::string dump;
+        for (std::size_t i = moves[0].line_no; i <= moves[3].line_no && i < lines.size(); ++i)
+            dump += std::to_string(i) + ": " + lines[i] + "\n";
+        INFO(dump);
+
+        const Reposition rep = find_reposition_between(lines, moves[1].line_no + 1, moves[2].line_no);
+        REQUIRE(rep.retract);    // filament retracted before crossing the gap
+        REQUIRE(rep.travel);     // non-extruding move across the gap
+        REQUIRE(rep.unretract);  // filament restored to begin part_b
+        REQUIRE(rep.ok());
+        // The travel repositions to part_b's start (the far side of the gap).
+        REQUIRE_THAT(rep.travel_x, Catch::Matchers::WithinAbs(part_b.start.x(), 1e-6));
+    }
+
+    // No reposition between part_b (40) and seg2 (50): they are physically
+    // contiguous, so seg2 simply continues — proving nothing was reordered.
+    {
+        const Reposition rep2 = find_reposition_between(lines, moves[2].line_no + 1, moves[3].line_no);
+        REQUIRE_FALSE(rep2.travel);   // no travel because head already at (40,20)
+    }
+
+    // Total extruded length ≈ original total (30 mm) minus the gap (2 mm) = 28 mm.
+    const double e_per_mm = (0.4 * 0.2) / (M_PI * (1.75 / 2.0) * (1.75 / 2.0));
+    double max_e = 0.0;
+    for (const auto& m : moves) max_e = std::max(max_e, m.e);
+    REQUIRE_THAT(max_e, Catch::Matchers::WithinRel(e_per_mm * 28.0, 0.005));
+}
+
+// ---------------------------------------------------------------------------
+// Splicing the same segment twice (splice part_b again) keeps ordering sane.
+// ---------------------------------------------------------------------------
+TEST_CASE("Splice: double-splice keeps three consecutive paths in print order", "[Splice]")
+{
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    DrawSession session = make_three_line_session();
+
+    // First splice: middle segment (30->40) at x=35, gap 2 → a(30->34), b(36->40).
+    DrawSegment a1, b1;
+    const DrawSegment orig1 = session.layers[0].segments[1];
+    REQUIRE(draw_splice_segment(orig1, Vec2d(35.0, 20.0), 2.0, a1, b1));
+    Slic3r::GUI::SpliceSegmentCommand(0, 1, orig1, a1, b1).execute(session);
+    // segments: [20->30] [30->34] [36->40] [40->50]
+    REQUIRE(session.layers[0].segments.size() == 4);
+
+    // Second splice: the new part_b (index 2, 36->40) at x=38, gap 1.
+    const DrawSegment orig2 = session.layers[0].segments[2];
+    DrawSegment a2, b2;
+    REQUIRE(draw_splice_segment(orig2, Vec2d(38.0, 20.0), 1.0, a2, b2));
+    Slic3r::GUI::SpliceSegmentCommand(0, 2, orig2, a2, b2).execute(session);
+    // segments: [20->30] [30->34] [36->~37.5] [~38.5->40] [40->50]
+    REQUIRE(session.layers[0].segments.size() == 5);
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+    const std::vector<std::string> lines = split_lines(gcode);
+    const std::vector<ExtrudeMove> moves = collect_extrude_moves(lines);
+
+    REQUIRE(moves.size() == 5);
+    // Strictly monotonic X endpoints — print order preserved through two splices.
+    for (std::size_t i = 1; i < moves.size(); ++i)
+        REQUIRE(moves[i].x > moves[i - 1].x);
+
+    // First and last endpoints unchanged by splicing.
+    REQUIRE_THAT(moves.front().x, Catch::Matchers::WithinAbs(30.0, 1e-6));
+    REQUIRE_THAT(moves.back().x,  Catch::Matchers::WithinAbs(50.0, 1e-6));
+}
+
+// ---------------------------------------------------------------------------
+// is_travel flag preserved on both halves for line, arc, AND bezier.
+// ---------------------------------------------------------------------------
+TEST_CASE("Splice: is_travel flag preserved on both halves for all segment types", "[Splice]")
+{
+    auto check = [](const DrawSegment& seg, const Vec2d& click, double gap, double tol) {
+        DrawSegment a, b;
+        REQUIRE(draw_splice_segment(seg, click, gap, a, b, tol));
+        REQUIRE(a.is_travel == seg.is_travel);
+        REQUIRE(b.is_travel == seg.is_travel);
+        REQUIRE(a.type == seg.type);
+        REQUIRE(b.type == seg.type);
+    };
+
+    const double cos45 = std::cos(M_PI / 4.0);
+
+    // Lines
+    check(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), /*travel=*/true),  Vec2d(5, 0), 2.0, 0.05);
+    check(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), /*travel=*/false), Vec2d(5, 0), 2.0, 0.05);
+    // Arcs
+    check(DrawSegment::make_arc(Vec2d(10, 0), Vec2d(10 * cos45, 10 * cos45), Vec2d(0, 10), /*travel=*/true),
+          Vec2d(10 * cos45, 10 * cos45), 1.0, 0.001);
+    check(DrawSegment::make_arc(Vec2d(10, 0), Vec2d(10 * cos45, 10 * cos45), Vec2d(0, 10), /*travel=*/false),
+          Vec2d(10 * cos45, 10 * cos45), 1.0, 0.001);
+    // Beziers
+    check(DrawSegment::make_bezier(Vec2d(0, 0), Vec2d(3, 8), Vec2d(7, 8), Vec2d(10, 0), /*travel=*/true),
+          Vec2d(5, 6), 1.0, 0.01);
+    check(DrawSegment::make_bezier(Vec2d(0, 0), Vec2d(3, 8), Vec2d(7, 8), Vec2d(10, 0), /*travel=*/false),
+          Vec2d(5, 6), 1.0, 0.01);
+}
+
+// ---------------------------------------------------------------------------
+// Splice with gap >= segment length returns false (no-op) for arc and bezier
+// (the line case is already covered in test_draw_mode_feedback.cpp).
+// ---------------------------------------------------------------------------
+TEST_CASE("Splice: oversized gap returns false for arc and bezier", "[Splice]")
+{
+    const double cos45 = std::cos(M_PI / 4.0);
+    // Quarter circle R=10 → arc length ≈ 15.7 mm. Gap of 100 mm is far too big.
+    const DrawSegment arc = DrawSegment::make_arc(
+        Vec2d(10, 0), Vec2d(10 * cos45, 10 * cos45), Vec2d(0, 10));
+    DrawSegment a, b;
+    REQUIRE_FALSE(draw_splice_segment(arc, Vec2d(10 * cos45, 10 * cos45), 100.0, a, b, 0.001));
+
+    // Bezier with modest length, gap of 1000 mm is impossible.
+    const DrawSegment bez = DrawSegment::make_bezier(
+        Vec2d(0, 0), Vec2d(3, 8), Vec2d(7, 8), Vec2d(10, 0));
+    REQUIRE_FALSE(draw_splice_segment(bez, Vec2d(5, 6), 1000.0, a, b, 0.01));
+}
+
+// ---------------------------------------------------------------------------
+// Arc winding preserved after splice: native-arc G-code keeps both halves G3
+// for a CCW arc and G2 for a CW arc.
+// ---------------------------------------------------------------------------
+TEST_CASE("Splice: CCW arc keeps both halves as G3 in native-arc mode", "[Splice]")
+{
+    DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/true);
+    DrawSession session = make_ccw_arc_session(/*native_arc=*/true);
+    const double cos45 = std::cos(M_PI / 4.0);
+
+    const DrawSegment original = session.layers[0].segments[0];
+    DrawSegment a, b;
+    REQUIRE(draw_splice_segment(original, Vec2d(10 * cos45, 10 * cos45), 1.0, a, b, 0.001));
+    Slic3r::GUI::SpliceSegmentCommand(0, 0, original, a, b).execute(session);
+    REQUIRE(session.layers[0].segments.size() == 2);
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    // Both spliced halves must remain CCW (G3); none may flip to G2.
+    REQUIRE(count_lines_starting_with(gcode, "G3 ") >= 2);
+    REQUIRE(count_lines_starting_with(gcode, "G2 ") == 0);
+}
+
+TEST_CASE("Splice: CW arc keeps both halves as G2 in native-arc mode", "[Splice]")
+{
+    DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/true);
+    DrawSession session = make_cw_arc_session(/*native_arc=*/true);
+    const double cos45 = std::cos(M_PI / 4.0);
+
+    const DrawSegment original = session.layers[0].segments[0];
+    DrawSegment a, b;
+    REQUIRE(draw_splice_segment(original, Vec2d(10 * cos45, 10 * cos45), 1.0, a, b, 0.001));
+    Slic3r::GUI::SpliceSegmentCommand(0, 0, original, a, b).execute(session);
+    REQUIRE(session.layers[0].segments.size() == 2);
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    // Both spliced halves must remain CW (G2); none may flip to G3.
+    REQUIRE(count_lines_starting_with(gcode, "G2 ") >= 2);
+    REQUIRE(count_lines_starting_with(gcode, "G3 ") == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Elephant's-foot compensation: first-layer flow reduction
+// ---------------------------------------------------------------------------
+
+// Sum of positive E values in G1 lines belonging to the block that starts at
+// ";LAYER:<layer_index>" and ends at the next ";LAYER:" marker (or end of file).
+static double sum_layer_extrusion(const std::string& gcode, int layer_index)
+{
+    const std::string marker = ";LAYER:" + std::to_string(layer_index);
+    std::size_t block_start = gcode.find(marker);
+    if (block_start == std::string::npos)
+        return 0.0;
+    block_start = gcode.find('\n', block_start);
+    if (block_start == std::string::npos)
+        return 0.0;
+    const std::size_t block_end = gcode.find(";LAYER:", block_start);
+
+    double total = 0.0;
+    std::size_t pos = block_start;
+    while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
+        if (block_end != std::string::npos && pos >= block_end)
+            break;
+        const std::size_t line_end = gcode.find('\n', pos);
+        const auto e_pos = gcode.find(" E", pos);
+        if (e_pos != std::string::npos && e_pos < line_end) {
+            const std::size_t val_start = e_pos + 2;
+            const double val = std::stod(
+                gcode.substr(val_start, gcode.find_first_of(" \n\r", val_start) - val_start));
+            if (val > 0.0)
+                total += val;
+        }
+        pos = (line_end != std::string::npos) ? line_end + 1 : std::string::npos;
+        if (pos == std::string::npos)
+            break;
+    }
+    return total;
+}
+
+TEST_CASE("DrawSession: first_layer_flow_ratio defaults to 0.90", "[DrawPathGCodeGenerator][ElephantFoot]")
+{
+    DrawSession session;
+    REQUIRE_THAT(session.first_layer_flow_ratio, Catch::Matchers::WithinRel(0.90, 1e-9));
+}
+
+TEST_CASE("DrawPathGCodeGenerator: first-layer flow ratio scales only layer 0 extrusion",
+    "[DrawPathGCodeGenerator][ElephantFoot]")
+{
+    // Two-layer session: layer 0 has one 10mm extrusion (+ a travel), layer 1 has
+    // two extrusions. Reducing the ratio must scale layer-0 E but leave layer-1 E intact.
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+    // Relative E so each G1 E value is a per-segment delta (absolute E is cumulative,
+    // which would make layer-0 reduction shift every later layer's totals).
+    cfg.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
+
+    const double ratio = 0.80;
+
+    DrawSession full = make_test_session();
+    full.first_layer_flow_ratio = 1.0;
+    DrawSession reduced = make_test_session();
+    reduced.first_layer_flow_ratio = ratio;
+
+    DrawPathGCodeGenerator gen_full(cfg, Vec2d::Zero());
+    const std::string g_full = gen_full.generate(full);
+    DrawPathGCodeGenerator gen_reduced(cfg, Vec2d::Zero());
+    const std::string g_reduced = gen_reduced.generate(reduced);
+
+    const double l0_full    = sum_layer_extrusion(g_full, 0);
+    const double l0_reduced = sum_layer_extrusion(g_reduced, 0);
+    const double l1_full    = sum_layer_extrusion(g_full, 1);
+    const double l1_reduced = sum_layer_extrusion(g_reduced, 1);
+
+    REQUIRE(l0_full > 0.0);
+    REQUIRE(l1_full > 0.0);
+
+    // Layer 0 is scaled by the ratio.
+    REQUIRE_THAT(l0_reduced, Catch::Matchers::WithinRel(l0_full * ratio, 1e-4));
+    // Layer 1 is unaffected.
+    REQUIRE_THAT(l1_reduced, Catch::Matchers::WithinRel(l1_full, 1e-4));
+}
+
+TEST_CASE("DrawPathGCodeGenerator: first_layer_flow_ratio of 1.0 reproduces legacy extrusion",
+    "[DrawPathGCodeGenerator][ElephantFoot]")
+{
+    // Backward-compat: ratio == 1.0 must equal the un-scaled PRD formula on layer 0.
+    const double expected_E = (0.4 * 0.2) / (M_PI * (1.75 / 2.0) * (1.75 / 2.0)) * 10.0;
+
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+
+    DrawSession session;
+    session.first_layer_flow_ratio = 1.0;
+    session.add_layer(0.2);
+    session.layers.back().segments.push_back({ Vec2d(0, 0), Vec2d(10, 0), false });
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 0), Catch::Matchers::WithinRel(expected_E, 0.01));
+}
+
+TEST_CASE("DrawPathGCodeGenerator: out-of-range first_layer_flow_ratio is clamped",
+    "[DrawPathGCodeGenerator][ElephantFoot]")
+{
+    const double base_E = (0.4 * 0.2) / (M_PI * (1.75 / 2.0) * (1.75 / 2.0)) * 10.0;
+
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+
+    DrawSession session;
+    session.first_layer_flow_ratio = -5.0; // absurd value -> clamped to lower bound 0.1
+    session.add_layer(0.2);
+    session.layers.back().segments.push_back({ Vec2d(0, 0), Vec2d(10, 0), false });
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 0), Catch::Matchers::WithinRel(base_E * 0.1, 1e-3));
+}
+
+// ===========================================================================
+// Anti-blob wipe + optional coasting
+// ===========================================================================
+
+// Split G-code into lines (local to the wipe/coast tests).
+static std::vector<std::string> wc_split_lines(const std::string& gcode)
+{
+    std::vector<std::string> lines;
+    std::size_t pos = 0;
+    while (pos <= gcode.size()) {
+        std::size_t nl = gcode.find('\n', pos);
+        if (nl == std::string::npos) { lines.push_back(gcode.substr(pos)); break; }
+        lines.push_back(gcode.substr(pos, nl - pos));
+        pos = nl + 1;
+    }
+    return lines;
+}
+
+// Index of the first line whose comment contains needle, or -1.
+static int wc_first_line_with_comment(const std::vector<std::string>& lines, const std::string& needle)
+{
+    for (std::size_t i = 0; i < lines.size(); ++i)
+        if (lines[i].find(needle) != std::string::npos)
+            return static_cast<int>(i);
+    return -1;
+}
+
+// Index of the first negative-E retract line (G1 with E < 0, no X), or -1.
+static int wc_first_retract_line(const std::vector<std::string>& lines)
+{
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        const std::string& ln = lines[i];
+        if (ln.rfind("G1 ", 0) != 0) continue;
+        auto e = extract_axis_value(ln, 'E');
+        auto x = extract_axis_value(ln, 'X');
+        if (e && *e < 0.0 && !x)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
+// Build a session with a single 0->10 line extrusion plus a trailing travel so a
+// mid-print retract (and thus wipe) is emitted.
+static DrawSession wc_make_line_then_travel_session()
+{
+    DrawSession session;
+    session.add_layer(0.2);
+    DrawLayer& l = session.layers.back();
+    l.segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
+    l.segments.push_back(DrawSegment::make_line(Vec2d(10, 0), Vec2d(20, 0), true)); // travel
+    return session;
+}
+
+TEST_CASE("DrawWipe: compute_wipe_geometry returns reversed direction and clamped endpoint", "[DrawWipe]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    DrawSession prime;
+    prime.wipe_distance_mm = 1.5;
+    prime.add_layer(0.2);
+    prime.layers.back().segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    gen.generate(prime); // captures wipe_distance_mm = 1.5 and curve tolerance
+
+    using WG = DrawPathGCodeGenerator::WipeGeometry;
+
+    SECTION("Line: endpoint 1.5mm back, direction (-1,0)") {
+        DrawSegment seg = DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false);
+        std::optional<WG> wg = gen.compute_wipe_geometry(seg, Vec2d::Zero());
+        REQUIRE(wg.has_value());
+        REQUIRE_THAT(wg->distance, Catch::Matchers::WithinAbs(1.5, 1e-6));
+        REQUIRE_THAT(wg->dir.x(), Catch::Matchers::WithinAbs(-1.0, 1e-6));
+        REQUIRE_THAT(wg->dir.y(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+        REQUIRE_THAT(wg->end_pt.x(), Catch::Matchers::WithinAbs(8.5, 1e-6));
+        REQUIRE_THAT(wg->end_pt.y(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    }
+
+    SECTION("CubicBezier: reversed end tangent (ctrl2 - end)") {
+        DrawSegment seg = DrawSegment::make_bezier(Vec2d(0, 0), Vec2d(0, 5), Vec2d(10, 5), Vec2d(10, 0), false);
+        std::optional<WG> wg = gen.compute_wipe_geometry(seg, Vec2d::Zero());
+        REQUIRE(wg.has_value());
+        // ctrl2 - end = (0,5) -> normalized (0,1).
+        REQUIRE_THAT(wg->dir.x(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+        REQUIRE_THAT(wg->dir.y(), Catch::Matchers::WithinAbs(1.0, 1e-6));
+        REQUIRE(wg->distance > 0.0);
+    }
+
+    SECTION("CircularArc: tangent at end is perpendicular to the end radius") {
+        // Quarter circle centered at origin: start (10,0) -> through (7.07,7.07) -> end (0,10).
+        DrawSegment seg = DrawSegment::make_arc(Vec2d(10, 0), Vec2d(7.0710678, 7.0710678), Vec2d(0, 10), false);
+        std::optional<WG> wg = gen.compute_wipe_geometry(seg, Vec2d::Zero());
+        REQUIRE(wg.has_value());
+        // End radius is (0,10); the wipe direction must be perpendicular to it.
+        const Vec2d r(0.0, 10.0);
+        REQUIRE_THAT(wg->dir.dot(r.normalized()), Catch::Matchers::WithinAbs(0.0, 1e-6));
+        REQUIRE(wg->distance > 0.0);
+    }
+
+    SECTION("Degenerate zero-length segment yields no wipe") {
+        DrawSegment seg = DrawSegment::make_line(Vec2d(3, 3), Vec2d(3, 3), false);
+        REQUIRE_FALSE(gen.compute_wipe_geometry(seg, Vec2d::Zero()).has_value());
+    }
+
+    SECTION("Wipe distance longer than segment is clamped to segment length") {
+        DrawSegment seg = DrawSegment::make_line(Vec2d(0, 0), Vec2d(0.5, 0), false);
+        std::optional<WG> wg = gen.compute_wipe_geometry(seg, Vec2d::Zero());
+        REQUIRE(wg.has_value());
+        REQUIRE_THAT(wg->distance, Catch::Matchers::WithinAbs(0.5, 1e-6));
+        REQUIRE_THAT(wg->end_pt.x(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    }
+}
+
+TEST_CASE("DrawWipe: wipe move precedes the first retract and conserves total retraction", "[DrawWipe]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    // Relative E so each G1 E is a per-move delta; retract_before_wipe = 0 so the
+    // wipe travel move is emitted before any retraction.
+    cfg.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
+    cfg.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 0.0 }));
+
+    DrawSession session = wc_make_line_then_travel_session();
+    session.wipe_enabled     = true;
+    session.wipe_distance_mm = 1.5;
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+    const std::vector<std::string> lines = wc_split_lines(gcode);
+
+    const int wipe_idx    = wc_first_line_with_comment(lines, "wipe");
+    const int retract_idx = wc_first_retract_line(lines);
+    REQUIRE(wipe_idx >= 0);
+    REQUIRE(retract_idx >= 0);
+    REQUIRE(wipe_idx < retract_idx); // wipe move emitted before the negative-E retract
+
+    // The wipe move heads toward decreasing X (backward along 0->10).
+    auto wipe_x = extract_axis_value(lines[wipe_idx], 'X');
+    REQUIRE(wipe_x.has_value());
+    REQUIRE(*wipe_x < 10.0);
+
+    // Total retracted length is conserved vs. the wipe-disabled baseline.
+    DrawSession baseline = session;
+    baseline.wipe_enabled = false;
+    DrawPathGCodeGenerator gen2(cfg, Vec2d::Zero());
+    const std::string base_gcode = gen2.generate(baseline);
+
+    auto sum_negative_E = [](const std::string& g) {
+        double s = 0.0;
+        for (const std::string& ln : wc_split_lines(g)) {
+            if (ln.rfind("G1 ", 0) != 0) continue;
+            auto e = extract_axis_value(ln, 'E');
+            if (e && *e < 0.0) s += *e;
+        }
+        return s;
+    };
+    REQUIRE_THAT(sum_negative_E(gcode), Catch::Matchers::WithinAbs(sum_negative_E(base_gcode), 1e-4));
+}
+
+TEST_CASE("DrawWipe: disabling wipe leaves output free of wipe moves", "[DrawWipe]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    DrawSession session = wc_make_line_then_travel_session();
+    session.wipe_enabled = false;
+    session.coast_distance_mm = 0.0;
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string disabled = gen.generate(session);
+    REQUIRE(count_occurrences(disabled, "wipe") == 0);
+
+    // Enabling wipe must change the output and introduce wipe moves.
+    DrawSession enabled = session;
+    enabled.wipe_enabled = true;
+    DrawPathGCodeGenerator gen2(cfg, Vec2d::Zero());
+    const std::string with_wipe = gen2.generate(enabled);
+    REQUIRE(count_occurrences(with_wipe, "wipe") > 0);
+    REQUIRE(disabled != with_wipe);
+}
+
+TEST_CASE("DrawWipe: postamble emits wipe then retract then lift", "[DrawWipe]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 0.0 }));
+
+    DrawSession session;
+    session.wipe_enabled     = true;
+    session.wipe_distance_mm = 1.5;
+    session.add_layer(0.2);
+    session.layers.back().segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+    const std::vector<std::string> lines = wc_split_lines(gcode);
+
+    const int wipe_idx    = wc_first_line_with_comment(lines, "wipe");
+    const int retract_idx = wc_first_retract_line(lines);
+    const int lift_idx    = wc_first_line_with_comment(lines, "nozzle lift");
+    REQUIRE(wipe_idx >= 0);
+    REQUIRE(retract_idx >= 0);
+    REQUIRE(lift_idx >= 0);
+    REQUIRE(wipe_idx < retract_idx);
+    REQUIRE(retract_idx < lift_idx);
+
+    // The lift is exactly +10 mm above the layer Z (layer z 0.2 + 10.0).
+    const auto lift_z = extract_axis_value(lines[lift_idx], 'Z');
+    REQUIRE(lift_z.has_value());
+    REQUIRE_THAT(*lift_z, Catch::Matchers::WithinAbs(10.2, 1e-6));
+}
+
+TEST_CASE("DrawWipe: wipe endpoint stays within the printable area", "[DrawWipe]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    DrawSession session;
+    session.wipe_enabled     = true;
+    session.wipe_distance_mm = 2.0;
+    session.add_layer(0.2);
+    DrawLayer& l = session.layers.back();
+    // Extrusion ending close to the +X plate edge, then a travel to trigger a wipe.
+    l.segments.push_back(DrawSegment::make_line(Vec2d(240, 125), Vec2d(248, 125), false));
+    l.segments.push_back(DrawSegment::make_line(Vec2d(248, 125), Vec2d(200, 125), true));
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    for (const std::string& ln : wc_split_lines(gcode)) {
+        if (ln.find("wipe") == std::string::npos) continue;
+        auto x = extract_axis_value(ln, 'X');
+        auto y = extract_axis_value(ln, 'Y');
+        if (x) { REQUIRE(*x >= 0.0); REQUIRE(*x <= 250.0); }
+        if (y) { REQUIRE(*y >= 0.0); REQUIRE(*y <= 250.0); }
+    }
+}
+
+TEST_CASE("DrawCoast: coasting on a line stops extrusion early but reaches the end", "[DrawCoast]")
+{
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    cfg.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
+
+    const double E_per_mm = (0.4 * 0.2) / (M_PI * (1.75 / 2.0) * (1.75 / 2.0));
+
+    DrawSession session;
+    session.first_layer_flow_ratio = 1.0; // avoid elephant-foot scaling
+    session.wipe_enabled           = false;
+    session.coast_distance_mm      = 2.0;
+    session.add_layer(0.2);
+    session.layers.back().segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    // Only 8 mm worth of material is extruded (last 2 mm coasted dry).
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 0), Catch::Matchers::WithinRel(E_per_mm * 8.0, 1e-3));
+
+    // The head still reaches X10 (dry travel over the coasted tail).
+    double max_x = 0.0;
+    for (const std::string& ln : wc_split_lines(gcode)) {
+        auto x = extract_axis_value(ln, 'X');
+        if (x) max_x = std::max(max_x, *x);
+    }
+    REQUIRE_THAT(max_x, Catch::Matchers::WithinAbs(10.0, 1e-3));
+
+    // coast = 0 reproduces the full-length extrusion and emits no coast move.
+    DrawSession no_coast = session;
+    no_coast.coast_distance_mm = 0.0;
+    DrawPathGCodeGenerator gen2(cfg, Vec2d::Zero());
+    const std::string base = gen2.generate(no_coast);
+    REQUIRE(count_occurrences(base, "coast") == 0);
+    REQUIRE_THAT(sum_layer_extrusion(base, 0), Catch::Matchers::WithinRel(E_per_mm * 10.0, 1e-3));
+}
+
+TEST_CASE("DrawCoast: coasting on arc and bezier reduces trailing extrusion without crashing", "[DrawCoast]")
+{
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    cfg.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
+
+    auto make_curve_session = [](DrawSegment seg, double coast) {
+        DrawSession s;
+        s.first_layer_flow_ratio = 1.0;
+        s.wipe_enabled           = false;
+        s.coast_distance_mm      = coast;
+        s.add_layer(0.2);
+        s.layers.back().segments.push_back(seg);
+        return s;
+    };
+
+    SECTION("CircularArc") {
+        DrawSegment arc = DrawSegment::make_arc(Vec2d(0, 0), Vec2d(5, 5), Vec2d(10, 0), false);
+        DrawPathGCodeGenerator g0(cfg, Vec2d::Zero());
+        DrawPathGCodeGenerator g2(cfg, Vec2d::Zero());
+        std::string base, coasted;
+        REQUIRE_NOTHROW(base    = g0.generate(make_curve_session(arc, 0.0)));
+        REQUIRE_NOTHROW(coasted = g2.generate(make_curve_session(arc, 2.0)));
+        REQUIRE(sum_layer_extrusion(coasted, 0) < sum_layer_extrusion(base, 0));
+    }
+
+    SECTION("CubicBezier") {
+        DrawSegment bez = DrawSegment::make_bezier(Vec2d(0, 0), Vec2d(3, 6), Vec2d(7, 6), Vec2d(10, 0), false);
+        DrawPathGCodeGenerator g0(cfg, Vec2d::Zero());
+        DrawPathGCodeGenerator g2(cfg, Vec2d::Zero());
+        std::string base, coasted;
+        REQUIRE_NOTHROW(base    = g0.generate(make_curve_session(bez, 0.0)));
+        REQUIRE_NOTHROW(coasted = g2.generate(make_curve_session(bez, 2.0)));
+        REQUIRE(sum_layer_extrusion(coasted, 0) < sum_layer_extrusion(base, 0));
     }
 }

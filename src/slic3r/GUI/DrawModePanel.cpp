@@ -48,6 +48,28 @@ static std::vector<ConnectedEndpointRef> find_connected_endpoints(
     return result;
 }
 
+static int find_nearest_segment_body(const DrawLayer& layer, const Vec2d& pos, double threshold_mm, double curve_tolerance_mm)
+{
+    int body_seg = -1;
+    double best_body = threshold_mm;
+    for (int si = 0; si < static_cast<int>(layer.segments.size()); ++si) {
+        const DrawSegment& seg = layer.segments[si];
+        if (seg.type == DrawSegmentType::Line) {
+            double t;
+            double d = DrawModeInputHandler::point_to_segment_distance(pos, seg.start, seg.end, t);
+            if (d < best_body) { best_body = d; body_seg = si; }
+        } else {
+            auto pts = draw_sample_segment(seg, curve_tolerance_mm);
+            for (size_t k = 1; k < pts.size(); ++k) {
+                double t;
+                double d = DrawModeInputHandler::point_to_segment_distance(pos, pts[k - 1], pts[k], t);
+                if (d < best_body) { best_body = d; body_seg = si; }
+            }
+        }
+    }
+    return body_seg;
+}
+
 DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL)
     , m_plater(plater)
@@ -88,9 +110,11 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_line_tool_btn  = new wxToggleButton(this, wxID_ANY, "Line");
     m_arc_tool_btn   = new wxToggleButton(this, wxID_ANY, "Arc");
     m_curve_tool_btn = new wxToggleButton(this, wxID_ANY, "Curve");
+    m_splice_btn     = new wxToggleButton(this, wxID_ANY, "Splice");
     m_line_tool_btn->SetToolTip("Draw straight lines (2 clicks)");
     m_arc_tool_btn->SetToolTip("Draw circular arcs (3 clicks: start, through-point, end)");
     m_curve_tool_btn->SetToolTip("Draw cubic bezier curves (4 clicks: start, ctrl1, ctrl2, end)");
+    m_splice_btn->SetToolTip("Splice: click a line to cut it into two (gap = grid size). Right-click to exit.");
     m_line_tool_btn->SetValue(true); // Line is the default
     m_fill_toggle = new wxToggleButton(this, wxID_ANY, "Fill Width");
     m_snap_toggle = new wxToggleButton(this, wxID_ANY, "Snap");
@@ -123,6 +147,34 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
         "Emit native G2/G3 arc commands for circular arcs\n"
         "instead of G1 linearization.\n"
         "Has no effect on Bezier curves or straight lines.");
+    m_first_layer_flow_spin = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+        wxDefaultPosition, wxSize(70, -1), wxSP_ARROW_KEYS, 50, 100, 90);
+    m_first_layer_flow_spin->SetToolTip(
+        "First-layer flow (%) \u2014 elephant's-foot compensation.\n"
+        "Scales only the bottom layer's extrusion so it bulges less\n"
+        "sideways. The drawn XY path is never moved, so dimensions\n"
+        "stay accurate. 100% = no reduction; default 90%.");
+
+    // Anti-blob wipe + optional coasting controls (mirror the flow spin pattern).
+    m_wipe_check = new wxCheckBox(this, wxID_ANY, "Wipe");
+    m_wipe_check->SetValue(true);
+    m_wipe_check->SetToolTip(
+        "Wipe backward along the just-printed path while retracting.\n"
+        "Bleeds end-of-path pressure over the toolpath instead of\n"
+        "leaving a blob at the seam. Total retraction is unchanged.");
+    m_wipe_dist_spin = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
+        wxDefaultPosition, wxSize(70, -1), wxSP_ARROW_KEYS, 0.0, 10.0, 1.0, 0.1);
+    m_wipe_dist_spin->SetToolTip(
+        "Wipe distance (mm) \u2014 how far the nozzle moves backward\n"
+        "along the last segment while retracting. Clamped to the\n"
+        "segment length. Default 1.0 mm.");
+    m_coast_spin = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
+        wxDefaultPosition, wxSize(70, -1), wxSP_ARROW_KEYS, 0.0, 10.0, 0.0, 0.1);
+    m_coast_spin->SetToolTip(
+        "Coasting (mm) \u2014 stop extruding this many mm before the\n"
+        "end of a segment and travel the rest dry. Incompatible with\n"
+        "firmware pressure/linear advance; keep at 0 when PA is on.\n"
+        "Default 0.0 (off).");
     m_measure_toggle = new wxToggleButton(this, wxID_ANY, "Show Measurements");
     m_coord_toggle = new wxToggleButton(this, wxID_ANY, "Show Coordinates");
     m_length_input = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(90, -1), wxTE_PROCESS_ENTER);
@@ -156,6 +208,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     top_sizer->Add(m_line_tool_btn,  0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_arc_tool_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_curve_tool_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_splice_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_fill_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_snap_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(new wxStaticText(this, wxID_ANY, "Grid:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
@@ -163,6 +216,13 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     top_sizer->Add(new wxStaticText(this, wxID_ANY, "Arc:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_arc_res_choice, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_native_arc_chk, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(new wxStaticText(this, wxID_ANY, "1st flow %:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_first_layer_flow_spin, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_wipe_check, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(new wxStaticText(this, wxID_ANY, "Wipe dist (mm):"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_wipe_dist_spin, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(new wxStaticText(this, wxID_ANY, "Coast (mm):"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    top_sizer->Add(m_coast_spin, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_measure_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(m_coord_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     top_sizer->Add(new wxStaticText(this, wxID_ANY, "Length:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
@@ -198,11 +258,16 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_line_tool_btn->Bind(wxEVT_TOGGLEBUTTON,  &DrawModePanel::on_line_tool,  this);
     m_arc_tool_btn->Bind(wxEVT_TOGGLEBUTTON,   &DrawModePanel::on_arc_tool,   this);
     m_curve_tool_btn->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_curve_tool, this);
+    m_splice_btn->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_splice_toggle, this);
     m_fill_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_fill_toggle, this);
     m_snap_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_snap_toggle, this);
     m_grid_res_choice->Bind(wxEVT_CHOICE, &DrawModePanel::on_grid_res_change, this);
     m_arc_res_choice->Bind(wxEVT_CHOICE,  &DrawModePanel::on_arc_res_change,  this);
     m_native_arc_chk->Bind(wxEVT_CHECKBOX, &DrawModePanel::on_native_arc_toggle, this);
+    m_first_layer_flow_spin->Bind(wxEVT_SPINCTRL, &DrawModePanel::on_first_layer_flow_change, this);
+    m_wipe_check->Bind(wxEVT_CHECKBOX, &DrawModePanel::on_wipe_toggle, this);
+    m_wipe_dist_spin->Bind(wxEVT_SPINCTRLDOUBLE, &DrawModePanel::on_wipe_dist_change, this);
+    m_coast_spin->Bind(wxEVT_SPINCTRLDOUBLE, &DrawModePanel::on_coast_change, this);
     m_measure_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_measure_toggle, this);
     m_coord_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_coord_toggle, this);
     m_length_input->Bind(wxEVT_TEXT, &DrawModePanel::on_length_text, this);
@@ -258,6 +323,8 @@ void DrawModePanel::activate(PartPlate* plate)
     m_zoom_factor = DRAW_MODE_DEFAULT_ZOOM_FACTOR;
     m_pan_offset = Vec2d(0.0, 0.0);
     m_pan_start.reset();
+    m_splice_active = false;
+    if (m_splice_btn) m_splice_btn->SetValue(false);
 
     if (m_plater) {
         const DrawModeDisplayPreferences& prefs = m_plater->model().draw_mode_display_preferences;
@@ -303,6 +370,18 @@ void DrawModePanel::activate(PartPlate* plate)
     m_session.native_arc_output  = false;
     if (m_arc_res_choice) m_arc_res_choice->SetSelection(3);
     if (m_native_arc_chk) m_native_arc_chk->SetValue(false);
+
+    // Reset first-layer flow (elephant's-foot compensation) to default 90%.
+    m_session.first_layer_flow_ratio = 0.90;
+    if (m_first_layer_flow_spin) m_first_layer_flow_spin->SetValue(90);
+
+    // Reset anti-blob wipe + coasting to defaults (wipe on / 1.0 mm, coast off).
+    m_session.wipe_enabled      = true;
+    m_session.wipe_distance_mm  = 1.0;
+    m_session.coast_distance_mm = 0.0;
+    if (m_wipe_check)     m_wipe_check->SetValue(true);
+    if (m_wipe_dist_spin) m_wipe_dist_spin->SetValue(1.0);
+    if (m_coast_spin)     m_coast_spin->SetValue(0.0);
 
     if (restore_existing_draw_object(plate))
         return;
@@ -364,6 +443,8 @@ void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
     m_zoom_factor = DRAW_MODE_DEFAULT_ZOOM_FACTOR;
     m_pan_offset = Vec2d(0.0, 0.0);
     m_pan_start.reset();
+    m_splice_active = false;
+    if (m_splice_btn) m_splice_btn->SetValue(false);
 
     // Reset tool selection
     m_draw_tool = DrawTool::Line;
@@ -383,6 +464,18 @@ void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
         m_arc_res_choice->SetSelection(best_idx);
     }
     if (m_native_arc_chk) m_native_arc_chk->SetValue(m_session.native_arc_output);
+
+    // Sync the first-layer flow spin to the loaded session's setting.
+    if (m_first_layer_flow_spin) {
+        int pct = static_cast<int>(std::lround(m_session.first_layer_flow_ratio * 100.0));
+        pct = std::clamp(pct, 50, 100);
+        m_first_layer_flow_spin->SetValue(pct);
+    }
+
+    // Sync the wipe / coast widgets to the loaded session's settings.
+    if (m_wipe_check)     m_wipe_check->SetValue(m_session.wipe_enabled);
+    if (m_wipe_dist_spin) m_wipe_dist_spin->SetValue(std::clamp(m_session.wipe_distance_mm, 0.0, 10.0));
+    if (m_coast_spin)     m_coast_spin->SetValue(std::clamp(m_session.coast_distance_mm, 0.0, 10.0));
 
     if (m_plater) {
         const DrawModeDisplayPreferences& prefs = m_plater->model().draw_mode_display_preferences;
@@ -436,6 +529,8 @@ void DrawModePanel::update_banner()
     wxString info = "Draw Mode";
     if (m_editing_obj_idx >= 0)
         info += wxString::Format(" - Editing object %d", m_editing_obj_idx + 1);
+    if (m_splice_active)
+        info += wxString::Format(" - Splice: click a segment to cut it (gap %.2f mm), right-click exits", m_grid_spacing);
     if (m_banner_text)
         m_banner_text->SetLabel(info);
 }
@@ -1237,6 +1332,25 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
     const Vec2d raw_pos = screen_to_plate(evt.GetPosition());
     Vec2d pos = snap_pos(raw_pos);
 
+    if (m_splice_active) {
+        const int active = m_session.active_layer;
+        if (active >= 0 && active < m_session.layer_count()) {
+            const DrawLayer& layer = m_session.layers[active];
+            const DrawTransform hit_t = get_draw_transform();
+            const double thr = hit_t.scale > 0 ? 8.0 / hit_t.scale : 1.0;
+            const int si = find_nearest_segment_body(layer, raw_pos, thr, m_session.curve_tolerance_mm);
+            if (si >= 0) {
+                DrawSegment part_a;
+                DrawSegment part_b;
+                const DrawSegment original = layer.segments[si];
+                if (draw_splice_segment(original, raw_pos, m_grid_spacing, part_a, part_b, m_session.curve_tolerance_mm))
+                    dispatch_command(std::make_unique<SpliceSegmentCommand>(active, si, original, part_a, part_b));
+            }
+        }
+        if (m_canvas) m_canvas->Refresh(false);
+        return;
+    }
+
     if (m_input_mode == DrawInputMode::Editing) {
         int active = m_session.active_layer;
         if (active < 0 || active >= m_session.layer_count()) return;
@@ -1303,24 +1417,7 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
         }
 
         // Priority 2: segment bodies (use sampled polylines for curves)
-        int body_seg = -1; double best_body = thr;
-        for (int si = 0; si < (int)layer.segments.size(); ++si) {
-            const DrawSegment& seg = layer.segments[si];
-            if (seg.type == DrawSegmentType::Line) {
-                double t;
-                double d = DrawModeInputHandler::point_to_segment_distance(
-                    pos, seg.start, seg.end, t);
-                if (d < best_body) { best_body = d; body_seg = si; }
-            } else {
-                auto pts = draw_sample_segment(seg, m_session.curve_tolerance_mm);
-                for (size_t k = 1; k < pts.size(); ++k) {
-                    double t;
-                    double d = DrawModeInputHandler::point_to_segment_distance(
-                        pos, pts[k-1], pts[k], t);
-                    if (d < best_body) { best_body = d; body_seg = si; }
-                }
-            }
-        }
+        const int body_seg = find_nearest_segment_body(layer, pos, thr, m_session.curve_tolerance_mm);
         m_sel_layer_idx = (body_seg >= 0) ? active : -1;
         m_sel_seg_idx   = body_seg;
         m_dragging_ep.reset();
@@ -1387,6 +1484,11 @@ void DrawModePanel::on_canvas_left_down(wxMouseEvent& evt)
 
 void DrawModePanel::on_canvas_right_down(wxMouseEvent&)
 {
+    if (m_splice_active) {
+        exit_splice_mode();
+        return;
+    }
+
     // Cancel pending draw or active drag
     reset_draft(false);
     if (m_is_dragging) {
@@ -1401,6 +1503,9 @@ void DrawModePanel::on_canvas_right_down(wxMouseEvent&)
 
 void DrawModePanel::on_canvas_left_up(wxMouseEvent& evt)
 {
+    if (m_splice_active)
+        return;
+
     // Check if we were dragging a control handle
     if (m_dragging_ctrl.has_value()) {
         if (m_canvas->HasCapture()) m_canvas->ReleaseMouse();
@@ -1451,6 +1556,13 @@ void DrawModePanel::on_canvas_motion(wxMouseEvent& evt)
 {
     const Vec2d raw_mouse = screen_to_plate(evt.GetPosition());
     m_mouse_plate = snap_pos(raw_mouse);
+    if (m_splice_active) {
+        if (m_canvas) {
+            m_canvas->SetCursor(wxCursor(wxCURSOR_CROSS));
+            m_canvas->Refresh(false);
+        }
+        return;
+    }
     
     // Handle middle-mouse pan dragging
     if (m_pan_start.has_value()) {
@@ -2012,6 +2124,27 @@ void DrawModePanel::on_native_arc_toggle(wxCommandEvent&)
     m_session.native_arc_output = m_native_arc_chk->GetValue();
 }
 
+void DrawModePanel::on_first_layer_flow_change(wxCommandEvent&)
+{
+    m_session.first_layer_flow_ratio = m_first_layer_flow_spin->GetValue() / 100.0;
+}
+
+void DrawModePanel::on_wipe_toggle(wxCommandEvent&)
+{
+    m_session.wipe_enabled = m_wipe_check->GetValue();
+}
+
+void DrawModePanel::on_wipe_dist_change(wxCommandEvent&)
+{
+    m_session.wipe_distance_mm = m_wipe_dist_spin->GetValue();
+}
+
+void DrawModePanel::on_coast_change(wxCommandEvent&)
+{
+    // Coasting is incompatible with firmware pressure/linear advance; keep off when PA is enabled.
+    m_session.coast_distance_mm = m_coast_spin->GetValue();
+}
+
 void DrawModePanel::on_measure_toggle(wxCommandEvent&)
 {
     m_show_measurements = m_measure_toggle->GetValue();
@@ -2085,6 +2218,41 @@ void DrawModePanel::on_curve_tool(wxCommandEvent&)
     m_arc_tool_btn->SetValue(false);
     m_curve_tool_btn->SetValue(true);
     reset_draft(false);
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::on_splice_toggle(wxCommandEvent&)
+{
+    if (m_splice_btn && m_splice_btn->GetValue()) {
+        m_saved_input_mode = m_input_mode;
+        m_saved_draw_tool = m_draw_tool;
+        m_splice_active = true;
+        reset_draft(false);
+        m_sel_layer_idx = -1;
+        m_sel_seg_idx = -1;
+        m_dragging_ep.reset();
+        m_dragging_ctrl.reset();
+        m_dragging_connected_eps.clear();
+        m_is_dragging = false;
+        update_banner();
+        if (m_canvas) m_canvas->Refresh(false);
+    } else {
+        exit_splice_mode();
+    }
+}
+
+void DrawModePanel::exit_splice_mode()
+{
+    m_splice_active = false;
+    m_input_mode = m_saved_input_mode;
+    m_draw_tool = m_saved_draw_tool;
+    if (m_splice_btn) m_splice_btn->SetValue(false);
+    if (m_draw_toggle) m_draw_toggle->SetValue(m_input_mode == DrawInputMode::Drawing);
+    if (m_edit_toggle) m_edit_toggle->SetValue(m_input_mode == DrawInputMode::Editing);
+    if (m_line_tool_btn) m_line_tool_btn->SetValue(m_draw_tool == DrawTool::Line);
+    if (m_arc_tool_btn) m_arc_tool_btn->SetValue(m_draw_tool == DrawTool::Arc);
+    if (m_curve_tool_btn) m_curve_tool_btn->SetValue(m_draw_tool == DrawTool::Bezier);
+    update_banner();
     if (m_canvas) m_canvas->Refresh(false);
 }
 

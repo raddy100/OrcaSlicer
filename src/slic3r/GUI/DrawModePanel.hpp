@@ -9,6 +9,7 @@
 #include <wx/dcclient.h>
 #include <wx/choice.h>
 #include <wx/checkbox.h>
+#include <wx/spinctrl.h>
 
 #include "libslic3r/DrawSession.hpp"
 #include "libslic3r/DrawModeFeedback.hpp"
@@ -74,6 +75,10 @@ private:
     wxChoice*          m_grid_res_choice{ nullptr }; // snap grid resolution selector
     wxChoice*          m_arc_res_choice { nullptr }; // arc/bezier segment resolution
     wxCheckBox*        m_native_arc_chk { nullptr }; // emit G2/G3 for circular arcs
+    wxSpinCtrl*        m_first_layer_flow_spin { nullptr }; // layer-0 flow % (elephant's foot)
+    wxCheckBox*        m_wipe_check     { nullptr }; // wipe backward while retracting (anti-blob)
+    wxSpinCtrlDouble*  m_wipe_dist_spin { nullptr }; // wipe distance (mm)
+    wxSpinCtrlDouble*  m_coast_spin     { nullptr }; // coast distance (mm); PA-incompatible
     wxToggleButton*    m_measure_toggle { nullptr };
     wxToggleButton*    m_coord_toggle   { nullptr };
     wxTextCtrl*        m_length_input   { nullptr };
@@ -95,6 +100,7 @@ private:
     wxToggleButton*    m_line_tool_btn  { nullptr };
     wxToggleButton*    m_arc_tool_btn   { nullptr };
     wxToggleButton*    m_curve_tool_btn { nullptr };
+    wxToggleButton*    m_splice_btn     { nullptr };
 
     // State
     Plater*      m_plater        { nullptr };
@@ -102,6 +108,9 @@ private:
     DrawInputMode m_input_mode   { DrawInputMode::Drawing };
     int          m_editing_obj_idx{ -1 }; // >=0 when editing existing object
     DrawTool     m_draw_tool     { DrawTool::Line }; // active drawing tool
+    bool         m_splice_active { false };
+    DrawInputMode m_saved_input_mode { DrawInputMode::Drawing };
+    DrawTool     m_saved_draw_tool { DrawTool::Line };
 
     // Layer clipboard: holds segments copied via "Copy Layer".
     // Cleared on activate(). Persists across layer navigation and undo/redo.
@@ -222,11 +231,17 @@ private:
     void on_line_tool(wxCommandEvent& evt);
     void on_arc_tool(wxCommandEvent& evt);
     void on_curve_tool(wxCommandEvent& evt);
+    void on_splice_toggle(wxCommandEvent& evt);
+    void exit_splice_mode();
     void on_fill_toggle(wxCommandEvent& evt);
     void on_snap_toggle(wxCommandEvent& evt);
     void on_grid_res_change(wxCommandEvent& evt);
     void on_arc_res_change(wxCommandEvent& evt);
     void on_native_arc_toggle(wxCommandEvent& evt);
+    void on_first_layer_flow_change(wxCommandEvent& evt);
+    void on_wipe_toggle(wxCommandEvent& evt);
+    void on_wipe_dist_change(wxCommandEvent& evt);
+    void on_coast_change(wxCommandEvent& evt);
     void on_measure_toggle(wxCommandEvent& evt);
     void on_coord_toggle(wxCommandEvent& evt);
     void on_length_text(wxCommandEvent& evt);

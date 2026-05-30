@@ -195,6 +195,40 @@ struct PasteSegmentsCommand : DrawCommand {
     }
 };
 
+// Replace one segment by two spliced parts, preserving print order.
+// Header-only so it can be unit-tested without pulling in the GUI library.
+struct SpliceSegmentCommand : DrawCommand {
+    int         layer_index;
+    int         segment_index;
+    DrawSegment original;
+    DrawSegment part_a;
+    DrawSegment part_b;
+
+    SpliceSegmentCommand(int layer_idx, int seg_idx, DrawSegment orig, DrawSegment a, DrawSegment b)
+        : layer_index(layer_idx)
+        , segment_index(seg_idx)
+        , original(std::move(orig))
+        , part_a(std::move(a))
+        , part_b(std::move(b))
+    {}
+
+    void execute(DrawSession& session) override {
+        assert(layer_index >= 0 && layer_index < session.layer_count());
+        DrawLayer& layer = session.layers[layer_index];
+        assert(segment_index >= 0 && segment_index < static_cast<int>(layer.segments.size()));
+        layer.segments[segment_index] = part_a;
+        layer.segments.insert(layer.segments.begin() + segment_index + 1, part_b);
+    }
+
+    void undo(DrawSession& session) override {
+        assert(layer_index >= 0 && layer_index < session.layer_count());
+        DrawLayer& layer = session.layers[layer_index];
+        assert(segment_index + 1 < static_cast<int>(layer.segments.size()));
+        layer.segments.erase(layer.segments.begin() + segment_index + 1);
+        layer.segments[segment_index] = original;
+    }
+};
+
 // Append a reversed copy of all layers to the session (Z-mirror of the stack).
 //
 // Normal case (no empty top layer):

@@ -9,6 +9,7 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 
 #include <boost/filesystem/operations.hpp>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -437,4 +438,131 @@ TEST_CASE("DrawModeFeedback: draw_display_length_mm for 90-degree arc of R=10 is
         Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R));
     const double len = draw_display_length_mm(seg);
     REQUIRE_THAT(len, WithinAbs(expected, expected * 0.01));
+}
+
+namespace {
+
+Vec2d splice_test_bezier_point(const DrawSegment& seg, double t)
+{
+    auto lerp_pt = [](Vec2d a, Vec2d b, double u) { return a + (b - a) * u; };
+    const Vec2d m01 = lerp_pt(seg.start, seg.ctrl1, t);
+    const Vec2d m12 = lerp_pt(seg.ctrl1, seg.ctrl2, t);
+    const Vec2d m23 = lerp_pt(seg.ctrl2, seg.end, t);
+    const Vec2d m012 = lerp_pt(m01, m12, t);
+    const Vec2d m123 = lerp_pt(m12, m23, t);
+    return lerp_pt(m012, m123, t);
+}
+
+double splice_test_distance_to_bezier(const DrawSegment& original, const Vec2d& p)
+{
+    double best = std::numeric_limits<double>::max();
+    for (int i = 0; i <= 1000; ++i) {
+        const double t = static_cast<double>(i) / 1000.0;
+        best = std::min(best, (splice_test_bezier_point(original, t) - p).norm());
+    }
+    return best;
+}
+
+} // namespace
+
+TEST_CASE("Splice: line center removes grid-sized gap", "[Splice]")
+{
+    const DrawSegment seg = DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(10.0, 0.0), true);
+    DrawSegment a;
+    DrawSegment b;
+
+    REQUIRE(draw_splice_segment(seg, Vec2d(5.0, 0.2), 2.0, a, b));
+    REQUIRE(a.type == DrawSegmentType::Line);
+    REQUIRE(b.type == DrawSegmentType::Line);
+    REQUIRE(a.is_travel);
+    REQUIRE(b.is_travel);
+    REQUIRE_THAT(a.start.x(), WithinAbs(0.0, 1e-12));
+    REQUIRE_THAT(a.start.y(), WithinAbs(0.0, 1e-12));
+    REQUIRE_THAT(b.end.x(), WithinAbs(10.0, 1e-12));
+    REQUIRE_THAT(b.end.y(), WithinAbs(0.0, 1e-12));
+    REQUIRE_THAT(a.end.y(), WithinAbs(0.0, 1e-12));
+    REQUIRE_THAT(b.start.y(), WithinAbs(0.0, 1e-12));
+    REQUIRE_THAT((b.start - a.end).norm(), WithinAbs(2.0, 1e-6));
+}
+
+TEST_CASE("Splice: line near end shifts gap inward", "[Splice]")
+{
+    const DrawSegment seg = DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(10.0, 0.0));
+    DrawSegment a;
+    DrawSegment b;
+
+    REQUIRE(draw_splice_segment(seg, Vec2d(0.0, 0.0), 2.0, a, b));
+    REQUIRE(a.length() >= 1e-3);
+    REQUIRE(b.length() >= 1e-3);
+    REQUIRE_THAT(a.end.x(), WithinAbs(1e-3, 1e-9));
+    REQUIRE_THAT(b.start.x(), WithinAbs(2.001, 1e-9));
+}
+
+TEST_CASE("Splice: line too short returns false", "[Splice]")
+{
+    const DrawSegment seg = DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(0.5, 0.0));
+    DrawSegment a;
+    DrawSegment b;
+    REQUIRE_FALSE(draw_splice_segment(seg, Vec2d(0.25, 0.0), 1.0, a, b));
+}
+
+TEST_CASE("Splice: arc preserves type, winding, radius and removes gap", "[Splice]")
+{
+    constexpr double R = 10.0;
+    const double cos45 = std::cos(M_PI / 4.0);
+    const DrawSegment seg = DrawSegment::make_arc(Vec2d(R, 0.0), Vec2d(R * cos45, R * cos45), Vec2d(0.0, R), true);
+    DrawSegment a;
+    DrawSegment b;
+
+    REQUIRE(draw_splice_segment(seg, Vec2d(R * cos45, R * cos45), 1.0, a, b, 0.001));
+    REQUIRE(a.type == DrawSegmentType::CircularArc);
+    REQUIRE(b.type == DrawSegmentType::CircularArc);
+    REQUIRE(a.is_travel);
+    REQUIRE(b.is_travel);
+    REQUIRE_THAT(a.start.x(), WithinAbs(seg.start.x(), 1e-10));
+    REQUIRE_THAT(a.start.y(), WithinAbs(seg.start.y(), 1e-10));
+    REQUIRE_THAT(b.end.x(), WithinAbs(seg.end.x(), 1e-10));
+    REQUIRE_THAT(b.end.y(), WithinAbs(seg.end.y(), 1e-10));
+
+    const double original_len = draw_segment_sampled_length(seg, 0.001);
+    const double spliced_len = draw_segment_sampled_length(a, 0.001) + draw_segment_sampled_length(b, 0.001);
+    REQUIRE_THAT(spliced_len, WithinAbs(original_len - 1.0, 0.05));
+
+    for (const DrawSegment& part : { a, b }) {
+        const std::vector<Vec2d> pts = draw_sample_segment(part, 0.001);
+        REQUIRE(pts.size() >= 2);
+        for (const Vec2d& p : pts)
+            REQUIRE_THAT(p.norm(), WithinAbs(R, 0.02));
+    }
+    REQUIRE(draw_sample_segment(a, 0.001).back().y() > a.start.y());
+    REQUIRE(b.end.y() > draw_sample_segment(b, 0.001).front().y());
+}
+
+TEST_CASE("Splice: bezier preserves curve portions and removes gap", "[Splice]")
+{
+    const DrawSegment seg = DrawSegment::make_bezier(
+        Vec2d(0.0, 0.0), Vec2d(3.0, 8.0), Vec2d(7.0, 8.0), Vec2d(10.0, 0.0), true);
+    DrawSegment a;
+    DrawSegment b;
+
+    REQUIRE(draw_splice_segment(seg, Vec2d(5.0, 6.0), 1.0, a, b, 0.01));
+    REQUIRE(a.type == DrawSegmentType::CubicBezier);
+    REQUIRE(b.type == DrawSegmentType::CubicBezier);
+    REQUIRE(a.is_travel);
+    REQUIRE(b.is_travel);
+    REQUIRE_THAT(a.start.x(), WithinAbs(seg.start.x(), 1e-10));
+    REQUIRE_THAT(a.start.y(), WithinAbs(seg.start.y(), 1e-10));
+    REQUIRE_THAT(b.end.x(), WithinAbs(seg.end.x(), 1e-10));
+    REQUIRE_THAT(b.end.y(), WithinAbs(seg.end.y(), 1e-10));
+
+    for (const DrawSegment& part : { a, b }) {
+        const std::vector<Vec2d> pts = draw_sample_segment(part, 0.01);
+        REQUIRE(pts.size() >= 2);
+        for (const Vec2d& p : pts)
+            REQUIRE(splice_test_distance_to_bezier(seg, p) < 0.03);
+    }
+
+    const double original_len = draw_segment_sampled_length(seg, 0.01);
+    const double spliced_len = draw_segment_sampled_length(a, 0.01) + draw_segment_sampled_length(b, 0.01);
+    REQUIRE_THAT(spliced_len, WithinAbs(original_len - 1.0, 0.15));
 }

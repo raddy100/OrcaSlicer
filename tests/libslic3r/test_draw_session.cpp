@@ -282,6 +282,79 @@ TEST_CASE("Draw3mf: round-trip preserves draw session", "[Draw3mf]")
 }
 
 // ---------------------------------------------------------------------------
+// Validation-added: criterion #8 — 3MF round-trip preserves the wipe/coast and
+// first-layer-flow scalar fields (the existing round-trip test above ignores
+// them). Asserts non-default values survive store -> load.
+// ---------------------------------------------------------------------------
+TEST_CASE("Draw3mf: round-trip preserves wipe/coast/flow scalar fields", "[Draw3mf]")
+{
+    Model src_model;
+    ModelObject* obj = src_model.add_object("TestDrawPathScalars", "", make_cube(10.0, 10.0, 10.0));
+    obj->add_instance();
+    obj->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+
+    auto src_session = std::make_unique<DrawSession>();
+    src_session->add_layer(0.2);
+    {
+        DrawSegment s;
+        s.start = Vec2d(0.0, 0.0); s.end = Vec2d(10.0, 0.0); s.is_travel = false;
+        src_session->layers[0].segments.push_back(s);
+    }
+    // Non-default values so a dropped/ignored field is detectable.
+    src_session->wipe_enabled           = false; // default is true
+    src_session->wipe_distance_mm       = 2.5;   // default is 1.0
+    src_session->coast_distance_mm      = 1.5;   // default is 0.0
+    src_session->first_layer_flow_ratio = 0.75;  // default is 0.90
+    obj->draw_session = std::move(src_session);
+
+    namespace fs = boost::filesystem;
+    const fs::path tmp = fs::temp_directory_path() / "orca_test_draw_scalars_roundtrip.3mf";
+    fs::remove(tmp);
+
+    DynamicPrintConfig store_cfg;
+    StoreParams sp;
+    sp.path   = tmp.string().c_str();
+    sp.model  = &src_model;
+    sp.config = &store_cfg;
+    REQUIRE(store_bbs_3mf(sp));
+    REQUIRE(fs::exists(tmp));
+
+    Model dst_model;
+    DynamicPrintConfig dst_cfg;
+    ConfigSubstitutionContext ctx{ ForwardCompatibilitySubstitutionRule::Disable };
+    PlateDataPtrs plate_data;
+    bool is_bbl = false, is_orca = false;
+    Semver ver;
+    const bool loaded = load_bbs_3mf(
+        tmp.string().c_str(), &dst_cfg, &ctx, &dst_model, &plate_data,
+        /*project_presets=*/nullptr, &is_bbl, &is_orca, &ver,
+        /*proFn=*/nullptr, LoadStrategy::LoadModel);
+    fs::remove(tmp);
+    release_PlateData_list(plate_data);
+
+    REQUIRE(loaded);
+    REQUIRE(dst_model.objects.size() == 1);
+    REQUIRE(dst_model.objects[0]->draw_session != nullptr);
+    const DrawSession& dst = *dst_model.objects[0]->draw_session;
+
+    REQUIRE(dst.wipe_enabled == false);
+    REQUIRE_THAT(dst.wipe_distance_mm,       WithinAbs(2.5,  1e-9));
+    REQUIRE_THAT(dst.coast_distance_mm,      WithinAbs(1.5,  1e-9));
+    REQUIRE_THAT(dst.first_layer_flow_ratio, WithinAbs(0.75, 1e-9));
+}
+
+// A DrawSession constructed without any 3MF attributes (mirroring a legacy file
+// missing the new attrs) must expose the back-compat defaults.
+TEST_CASE("Draw3mf: legacy/default session exposes wipe-coast back-compat defaults", "[Draw3mf]")
+{
+    DrawSession s;
+    REQUIRE(s.wipe_enabled == true);
+    REQUIRE_THAT(s.wipe_distance_mm,       WithinAbs(1.0, 1e-9));
+    REQUIRE_THAT(s.coast_distance_mm,      WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.first_layer_flow_ratio, WithinAbs(0.90, 1e-9));
+}
+
+// ---------------------------------------------------------------------------
 // DrawSession::remove_layer tests
 // ---------------------------------------------------------------------------
 
@@ -2319,4 +2392,37 @@ TEST_CASE("DeleteLayer: delete-then-undo does not leak z shifts", "[DeleteLayerZ
     // Undo again: must restore exactly.
     cmd2.undo(s);
     verify_original("After second undo");
+}
+
+TEST_CASE("SpliceSegmentCommand preserves print order and undo/redo", "[Splice]")
+{
+    DrawSession session;
+    session.add_layer(0.2);
+    session.active_layer = 0;
+    const DrawSegment first = DrawSegment::make_line(Vec2d(0.0, 0.0), Vec2d(1.0, 0.0));
+    const DrawSegment original = DrawSegment::make_line(Vec2d(1.0, 0.0), Vec2d(5.0, 0.0));
+    const DrawSegment later = DrawSegment::make_line(Vec2d(5.0, 0.0), Vec2d(6.0, 0.0));
+    const DrawSegment part_a = DrawSegment::make_line(Vec2d(1.0, 0.0), Vec2d(2.0, 0.0));
+    const DrawSegment part_b = DrawSegment::make_line(Vec2d(3.0, 0.0), Vec2d(5.0, 0.0));
+    session.layers[0].segments = { first, original, later };
+
+    Slic3r::GUI::SpliceSegmentCommand cmd(0, 1, original, part_a, part_b);
+    cmd.execute(session);
+    REQUIRE(session.layers[0].segments.size() == 4);
+    REQUIRE_THAT(session.layers[0].segments[1].end.x(), WithinAbs(part_a.end.x(), 1e-12));
+    REQUIRE_THAT(session.layers[0].segments[2].start.x(), WithinAbs(part_b.start.x(), 1e-12));
+    REQUIRE_THAT(session.layers[0].segments[3].start.x(), WithinAbs(later.start.x(), 1e-12));
+    REQUIRE_THAT(session.layers[0].segments[3].end.x(), WithinAbs(later.end.x(), 1e-12));
+
+    cmd.undo(session);
+    REQUIRE(session.layers[0].segments.size() == 3);
+    REQUIRE_THAT(session.layers[0].segments[1].start.x(), WithinAbs(original.start.x(), 1e-12));
+    REQUIRE_THAT(session.layers[0].segments[1].end.x(), WithinAbs(original.end.x(), 1e-12));
+    REQUIRE_THAT(session.layers[0].segments[2].start.x(), WithinAbs(later.start.x(), 1e-12));
+
+    cmd.execute(session);
+    REQUIRE(session.layers[0].segments.size() == 4);
+    REQUIRE_THAT(session.layers[0].segments[1].end.x(), WithinAbs(part_a.end.x(), 1e-12));
+    REQUIRE_THAT(session.layers[0].segments[2].start.x(), WithinAbs(part_b.start.x(), 1e-12));
+    REQUIRE_THAT(session.layers[0].segments[3].start.x(), WithinAbs(later.start.x(), 1e-12));
 }
