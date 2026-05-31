@@ -85,6 +85,8 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_next_layer_btn = new wxButton(this, wxID_ANY, "Next >");
     m_remove_layer_btn = new wxButton(this, wxID_ANY, "- Layer");
     m_add_layer_btn  = new wxButton(this, wxID_ANY, "+ Layer");
+    m_insert_below_btn = new wxButton(this, wxID_ANY, "Insert Below");
+    m_insert_below_btn->SetToolTip("Insert a new empty layer at the current position.\nThe current layer and all layers above it shift up by one.");
     m_delete_layer_btn = new wxButton(this, wxID_ANY, "Delete Layer");
     m_remove_layer_btn->SetToolTip("Go down a layer.\nIf the current layer is empty it will be deleted.");
     m_delete_layer_btn->SetToolTip("Delete the current layer and all its segments.");
@@ -239,6 +241,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     nav_sizer->Add(m_next_layer_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     nav_sizer->Add(m_remove_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     nav_sizer->Add(m_add_layer_btn,    0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    nav_sizer->Add(m_insert_below_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     nav_sizer->Add(m_delete_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     nav_sizer->Add(m_copy_layer_btn,  0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
     nav_sizer->Add(m_paste_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
@@ -276,6 +279,7 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_prev_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_prev_layer, this);
     m_next_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_next_layer, this);
     m_add_layer_btn->Bind(wxEVT_BUTTON,  &DrawModePanel::on_add_layer,  this);
+    m_insert_below_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_insert_below, this);
     m_remove_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_remove_layer, this);
     m_delete_layer_btn->Bind(wxEVT_BUTTON, &DrawModePanel::on_delete_layer, this);
     m_clear_btn->Bind(wxEVT_BUTTON,      &DrawModePanel::on_clear_layer, this);
@@ -569,6 +573,9 @@ void DrawModePanel::update_layer_label()
     const bool at_top  = !has_layers || (active_valid && active == count - 1);
     const bool can_add = !at_top || !layer_empty;
     if (m_add_layer_btn)     m_add_layer_btn->Enable(can_add);
+    // "Insert Below" inserts a new empty layer at the current position, pushing
+    // the current layer (and everything above) up. Requires a valid active layer.
+    if (m_insert_below_btn)  m_insert_below_btn->Enable(active_valid);
 }
 
 void DrawModePanel::dispatch_command(std::unique_ptr<DrawCommand> cmd)
@@ -1713,6 +1720,23 @@ void DrawModePanel::on_add_layer(wxCommandEvent&)
         if (lh <= 0.0) lh = 0.2;
     }
     dispatch_command(std::make_unique<AddLayerCommand>(lh));
+}
+
+void DrawModePanel::on_insert_below(wxCommandEvent&)
+{
+    const int active = m_session.active_layer;
+    if (active < 0 || active >= m_session.layer_count()) return;
+
+    double lh = 0.2;
+    if (wxGetApp().preset_bundle) {
+        lh = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
+        if (lh <= 0.0) lh = 0.2;
+    }
+
+    // Insert a new empty layer at the current position. The current layer and
+    // everything above it shift up by one; the new empty layer becomes active.
+    dispatch_command(std::make_unique<InsertLayerBeforeActiveCommand>(lh));
+    reset_draft(false);
 }
 
 void DrawModePanel::on_remove_layer(wxCommandEvent&)

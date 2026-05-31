@@ -114,6 +114,50 @@ struct InsertLayerAfterActiveCommand : DrawCommand {
     void undo(DrawSession& session) override;
 };
 
+// Insert a new empty layer at the current active layer's position, pushing the
+// current layer (and everything above it) up by one. The inserted empty layer
+// takes the current layer's index and becomes the new active layer. Used by the
+// "Insert Below" button.
+//
+// Example: active == 6 in a 10-layer stack ⇒ a new empty layer becomes index 6,
+// the old layer 6 becomes 7, …, and the stack now has 11 layers.
+//
+// When the session has no layers, the first layer is created at position 0.
+// Header-only so it can be unit-tested from test_draw_session.cpp without
+// pulling in the GUI library.
+struct InsertLayerBeforeActiveCommand : DrawCommand {
+    double layer_height;
+    int    insert_position; // populated during execute() for undo
+    int    saved_active;    // active_layer before execute(), restored on undo
+
+    explicit InsertLayerBeforeActiveCommand(double lh)
+        : layer_height(lh), insert_position(-1), saved_active(-1) {}
+
+    void execute(DrawSession& session) override {
+        saved_active    = session.active_layer;
+        // Insert at the active position (push current layer up). With no active
+        // layer (empty session), create the first layer at position 0.
+        insert_position = (saved_active < 0) ? 0 : saved_active;
+        session.insert_layer(insert_position, layer_height);
+    }
+
+    void undo(DrawSession& session) override {
+        assert(insert_position >= 0 && insert_position < session.layer_count());
+        const double lh = session.layers[insert_position].layer_height();
+
+        session.layers.erase(session.layers.begin() + insert_position);
+
+        // Undo z-shift and layer_index increment for all layers shifted up.
+        for (int i = insert_position; i < (int) session.layers.size(); ++i) {
+            session.layers[i].z_start     -= lh;
+            session.layers[i].z_end       -= lh;
+            session.layers[i].layer_index  = i;
+        }
+
+        session.active_layer = saved_active;
+    }
+};
+
 // Clear all segments from a layer (preserves the layer itself).
 struct ClearLayerCommand : DrawCommand {
     int                      layer_index;

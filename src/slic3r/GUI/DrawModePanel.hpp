@@ -87,6 +87,7 @@ private:
     wxButton*          m_next_layer_btn { nullptr };
     wxButton*          m_remove_layer_btn { nullptr }; // go down / delete if empty
     wxButton*          m_add_layer_btn  { nullptr };
+    wxButton*          m_insert_below_btn { nullptr }; // insert empty layer at current position
     wxButton*          m_delete_layer_btn { nullptr }; // always delete current layer
     wxButton*          m_copy_layer_btn   { nullptr }; // copy current layer to clipboard
     wxButton*          m_paste_layer_btn  { nullptr }; // paste clipboard into current layer
@@ -254,6 +255,7 @@ private:
     void on_prev_layer(wxCommandEvent& evt);
     void on_next_layer(wxCommandEvent& evt);
     void on_add_layer(wxCommandEvent& evt);
+    void on_insert_below(wxCommandEvent& evt);
     void on_remove_layer(wxCommandEvent& evt);
     void on_delete_layer(wxCommandEvent& evt);
     void on_clear_layer(wxCommandEvent& evt);

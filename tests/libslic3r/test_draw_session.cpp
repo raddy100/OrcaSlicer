@@ -2250,6 +2250,138 @@ TEST_CASE("DeleteLayer: insert_layer then remove_layer are perfect inverses", "[
     }
 }
 
+// ---------------------------------------------------------------------------
+// InsertLayerBeforeActiveCommand — "Insert Below" button
+// ---------------------------------------------------------------------------
+
+TEST_CASE("InsertLayerBeforeActiveCommand — inserts at layer 0 and pushes content up", "[InsertLayerBelow]")
+{
+    // Single content layer, active on layer 0 (user example #1).
+    DrawSession s;
+    s.add_layer(0.2);
+    s.layers[0].segments.push_back(make_seg(0.0, 0.0, 5.0, 0.0));
+    REQUIRE(s.active_layer == 0);
+
+    Slic3r::GUI::InsertLayerBeforeActiveCommand cmd(0.2);
+    cmd.execute(s);
+
+    // Now 2 layers; the new empty layer is index 0 and active.
+    REQUIRE(s.layer_count() == 2);
+    REQUIRE(s.active_layer == 0);
+    REQUIRE(s.layers[0].segments.empty());
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.2, 1e-9));
+
+    // The old layer 0 (with content) is now layer 1, pushed up by one height.
+    REQUIRE(s.layers[1].layer_index == 1);
+    REQUIRE(s.layers[1].segments.size() == 1);
+    REQUIRE_THAT(s.layers[1].z_start, WithinAbs(0.2, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   WithinAbs(0.4, 1e-9));
+}
+
+TEST_CASE("InsertLayerBeforeActiveCommand — inserts at mid-stack active layer", "[InsertLayerBelow]")
+{
+    // 10 layers each 0.3 mm, active on layer 6 (user example #2).
+    DrawSession s;
+    for (int i = 0; i < 10; ++i) {
+        s.add_layer(0.3);
+        s.layers[i].segments.push_back(make_seg(
+            static_cast<double>(i), 0.0, static_cast<double>(i + 1), 0.0));
+    }
+    s.active_layer = 6;
+    REQUIRE(s.layer_count() == 10);
+
+    // Remember the content that lived on layer 6 (start.x == 6).
+    const double orig_layer6_start_x = s.layers[6].segments[0].start.x();
+    const double orig_layer6_z_start = s.layers[6].z_start;
+
+    Slic3r::GUI::InsertLayerBeforeActiveCommand cmd(0.3);
+    cmd.execute(s);
+
+    // Previously 10 layers, now 11; new highest layer index is 10.
+    REQUIRE(s.layer_count() == 11);
+    REQUIRE(s.active_layer == 6);
+
+    // The new layer 6 is empty and occupies the old layer-6 Z band.
+    REQUIRE(s.layers[6].segments.empty());
+    REQUIRE(s.layers[6].layer_index == 6);
+    REQUIRE_THAT(s.layers[6].z_start, WithinAbs(orig_layer6_z_start, 1e-9));
+
+    // The old layer 6 content moved up to layer 7, shifted by 0.3 mm.
+    REQUIRE(s.layers[7].layer_index == 7);
+    REQUIRE_THAT(s.layers[7].segments[0].start.x(), WithinAbs(orig_layer6_start_x, 1e-9));
+    REQUIRE_THAT(s.layers[7].z_start, WithinAbs(orig_layer6_z_start + 0.3, 1e-9));
+
+    // Layers below the insertion point are untouched.
+    for (int i = 0; i < 6; ++i) {
+        REQUIRE(s.layers[i].layer_index == i);
+        REQUIRE_THAT(s.layers[i].segments[0].start.x(),
+                     WithinAbs(static_cast<double>(i), 1e-9));
+    }
+
+    // Contiguous Z across the whole stack.
+    for (int i = 1; i < s.layer_count(); ++i)
+        REQUIRE_THAT(s.layers[i].z_start, WithinAbs(s.layers[i - 1].z_end, 1e-9));
+}
+
+TEST_CASE("InsertLayerBeforeActiveCommand — undo restores original stack exactly", "[InsertLayerBelow]")
+{
+    DrawSession s;
+    for (int i = 0; i < 4; ++i) {
+        s.add_layer(0.25);
+        s.layers[i].segments.push_back(make_seg(
+            static_cast<double>(i), 0.0, static_cast<double>(i + 1), 0.0));
+    }
+    s.active_layer = 2;
+
+    const int    orig_count   = s.layer_count();
+    const int    orig_active  = s.active_layer;
+    std::vector<double> orig_z_start, orig_z_end;
+    std::vector<int>    orig_index;
+    for (const auto& l : s.layers) {
+        orig_z_start.push_back(l.z_start);
+        orig_z_end.push_back(l.z_end);
+        orig_index.push_back(l.layer_index);
+    }
+
+    Slic3r::GUI::InsertLayerBeforeActiveCommand cmd(0.25);
+    cmd.execute(s);
+    REQUIRE(s.layer_count() == orig_count + 1);
+
+    cmd.undo(s);
+
+    REQUIRE(s.layer_count() == orig_count);
+    REQUIRE(s.active_layer == orig_active);
+    for (int i = 0; i < orig_count; ++i) {
+        INFO("Checking layer " << i << " after insert-below undo");
+        REQUIRE_THAT(s.layers[i].z_start, WithinAbs(orig_z_start[i], 1e-9));
+        REQUIRE_THAT(s.layers[i].z_end,   WithinAbs(orig_z_end[i],   1e-9));
+        REQUIRE(s.layers[i].layer_index == orig_index[i]);
+        REQUIRE_THAT(s.layers[i].segments[0].start.x(),
+                     WithinAbs(static_cast<double>(i), 1e-9));
+    }
+}
+
+TEST_CASE("InsertLayerBeforeActiveCommand — creates first layer when session empty", "[InsertLayerBelow]")
+{
+    DrawSession s;
+    REQUIRE(s.layer_count() == 0);
+    REQUIRE(s.active_layer == -1);
+
+    Slic3r::GUI::InsertLayerBeforeActiveCommand cmd(0.2);
+    cmd.execute(s);
+
+    REQUIRE(s.layer_count() == 1);
+    REQUIRE(s.active_layer == 0);
+    REQUIRE(s.layers[0].segments.empty());
+    REQUIRE_THAT(s.layers[0].z_start, WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   WithinAbs(0.2, 1e-9));
+
+    cmd.undo(s);
+    REQUIRE(s.layer_count() == 0);
+    REQUIRE(s.active_layer == -1);
+}
+
 TEST_CASE("DeleteLayer: remove then mirror stack produces contiguous Z", "[DeleteLayerZShift]")
 {
     // Create 5 layers each 0.3 mm, each with one content segment.
