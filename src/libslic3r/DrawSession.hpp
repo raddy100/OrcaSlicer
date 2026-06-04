@@ -98,11 +98,15 @@ struct DrawSession {
     // G1 linearization.  Bezier curves always use G1 regardless of this flag.
     bool native_arc_output = false;
 
-    // Elephant's-foot mitigation for Draw Mode. Scales the extrusion amount (E)
-    // of the first layer (layer_index == 0) only; the XY toolpath is never moved,
-    // so drawn lengths/positions stay accurate. The slightly starved bottom bead
-    // has less material to bulge sideways. 1.0 = no reduction; default 0.90 (90%).
-    double first_layer_flow_ratio = 0.90;
+    // Per-initial-layer extrusion flow multiplier (elephant's-foot mitigation extended to N layers).
+    // Index = layer_index. Layers at/above the vector size use 1.0 (no reduction).
+    // Default {0.90} preserves the original layer-0-only behavior.
+    std::vector<double> initial_layer_flow_ratios { 0.90 };
+
+    // Per-initial-layer height override (mm). Index = layer_index. An entry <= 0, or any
+    // layer at/above the vector size, means "no override" (keep that layer's natural height).
+    // Default empty = no height overrides (fully backward compatible).
+    std::vector<double> initial_layer_heights {};
 
     // Anti-blob wipe: before each retract, move the nozzle backward along the
     // just-printed segment (no extrusion) so the end-of-path pressure bleeds out
@@ -135,6 +139,15 @@ struct DrawSession {
     bool   remove_layer(int index);
     void   clear();
     double total_height() const;
+
+    // Flow multiplier for a given layer index (1.0 beyond the configured initial layers).
+    // Does NOT clamp; clamping (to a safe extrusion range) happens in the generator.
+    double flow_ratio_for_layer(int layer_index) const;
+
+    // Recompute z_start/z_end of ALL layers cumulatively. For layer i, use
+    // initial_layer_heights[i] when present and > 0, otherwise keep that layer's current
+    // natural height (z_end - z_start). Stacks each layer on the previous layer's z_end.
+    void   reflow_layer_z();
 
     // 3-D bounding box across all layers — used to create the synthetic mesh.
     BoundingBoxf3 bounding_box() const;

@@ -159,7 +159,7 @@ TEST_CASE("DrawPathGCodeGenerator: extrusion math matches PRD formula", "[DrawPa
 
     DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
     DrawSession session;
-    session.first_layer_flow_ratio = 1.0; // isolate base extrusion formula from elephant's-foot default
+    session.initial_layer_flow_ratios = {1.0}; // isolate base extrusion formula from elephant's-foot default
     session.add_layer(0.2);
     DrawLayer& l = session.layers.back();
     DrawSegment seg; seg.start = Vec2d(0, 0); seg.end = Vec2d(10, 0); seg.is_travel = false;
@@ -1129,7 +1129,7 @@ TEST_CASE("DrawPathGCodeGenerator: compat mode arc extrusion total matches arc l
     DynamicPrintConfig cfg = make_arc_config(/*native_arc=*/false);
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
     DrawSession arc_session = make_ccw_arc_session();
-    arc_session.first_layer_flow_ratio = 1.0; // isolate base extrusion from elephant's-foot default
+    arc_session.initial_layer_flow_ratios = {1.0}; // isolate base extrusion from elephant's-foot default
     const std::string gcode = gen.generate(arc_session);
 
     // E is absolute: the total extrusion for the arc is the maximum E seen
@@ -1514,7 +1514,7 @@ TEST_CASE("Splice: G-code emits two consecutive extrusion paths with a gap repos
 {
     DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
     DrawSession session = make_three_line_session();
-    session.first_layer_flow_ratio = 1.0; // isolate base extrusion formula from elephant's-foot default
+    session.initial_layer_flow_ratios = {1.0}; // isolate base extrusion formula from elephant's-foot default
 
     // Splice the middle segment (index 1) at its midpoint with a 2 mm gap.
     const DrawSegment original = session.layers[0].segments[1];
@@ -1747,10 +1747,13 @@ static double sum_layer_extrusion(const std::string& gcode, int layer_index)
     return total;
 }
 
-TEST_CASE("DrawSession: first_layer_flow_ratio defaults to 0.90", "[DrawPathGCodeGenerator][ElephantFoot]")
+TEST_CASE("DrawSession: initial_layer_flow_ratios defaults to {0.90}", "[DrawPathGCodeGenerator][ElephantFoot]")
 {
     DrawSession session;
-    REQUIRE_THAT(session.first_layer_flow_ratio, Catch::Matchers::WithinRel(0.90, 1e-9));
+    REQUIRE(session.initial_layer_flow_ratios.size() == 1);
+    REQUIRE_THAT(session.initial_layer_flow_ratios[0], Catch::Matchers::WithinRel(0.90, 1e-9));
+    REQUIRE_THAT(session.flow_ratio_for_layer(0), Catch::Matchers::WithinRel(0.90, 1e-9));
+    REQUIRE(session.initial_layer_heights.empty());
 }
 
 TEST_CASE("DrawPathGCodeGenerator: first-layer flow ratio scales only layer 0 extrusion",
@@ -1767,9 +1770,9 @@ TEST_CASE("DrawPathGCodeGenerator: first-layer flow ratio scales only layer 0 ex
     const double ratio = 0.80;
 
     DrawSession full = make_test_session();
-    full.first_layer_flow_ratio = 1.0;
+    full.initial_layer_flow_ratios = {1.0};
     DrawSession reduced = make_test_session();
-    reduced.first_layer_flow_ratio = ratio;
+    reduced.initial_layer_flow_ratios = {ratio};
 
     DrawPathGCodeGenerator gen_full(cfg, Vec2d::Zero());
     const std::string g_full = gen_full.generate(full);
@@ -1800,7 +1803,7 @@ TEST_CASE("DrawPathGCodeGenerator: first_layer_flow_ratio of 1.0 reproduces lega
     cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
 
     DrawSession session;
-    session.first_layer_flow_ratio = 1.0;
+    session.initial_layer_flow_ratios = {1.0};
     session.add_layer(0.2);
     session.layers.back().segments.push_back({ Vec2d(0, 0), Vec2d(10, 0), false });
 
@@ -1819,7 +1822,7 @@ TEST_CASE("DrawPathGCodeGenerator: out-of-range first_layer_flow_ratio is clampe
     cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
 
     DrawSession session;
-    session.first_layer_flow_ratio = -5.0; // absurd value -> clamped to lower bound 0.1
+    session.initial_layer_flow_ratios = {-5.0}; // absurd value -> clamped to lower bound 0.1
     session.add_layer(0.2);
     session.layers.back().segments.push_back({ Vec2d(0, 0), Vec2d(10, 0), false });
 
@@ -1827,6 +1830,191 @@ TEST_CASE("DrawPathGCodeGenerator: out-of-range first_layer_flow_ratio is clampe
     const std::string gcode = gen.generate(session);
 
     REQUIRE_THAT(sum_layer_extrusion(gcode, 0), Catch::Matchers::WithinRel(base_E * 0.1, 1e-3));
+}
+
+// ===========================================================================
+// Initial layers: per-layer flow ratios + per-layer height overrides
+// ===========================================================================
+
+// Build an N-layer session where every layer is one straight 10 mm extrusion.
+static DrawSession make_n_layer_line_session(int n, double layer_h = 0.2)
+{
+    DrawSession session;
+    for (int i = 0; i < n; ++i) {
+        session.add_layer(layer_h);
+        session.layers.back().segments.push_back(
+            DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
+    }
+    return session;
+}
+
+// Return the Z height at which the ";LAYER:<idx>" block prints. The generator emits Z
+// only when it changes, so the active Z may have been set earlier (preamble or a prior
+// layer). Track the current Z scanning from the start of the G-code and return its value
+// at the first move (G0/G1) inside the target block. Returns -1 if not found.
+static double layer_block_z(const std::string& gcode, int layer_index)
+{
+    const std::string marker = ";LAYER:" + std::to_string(layer_index);
+    const std::size_t marker_pos = gcode.find(marker);
+    if (marker_pos == std::string::npos)
+        return -1.0;
+
+    double current_z = -1.0;
+    bool   in_block  = false;
+    std::size_t pos  = 0;
+    while (pos < gcode.size()) {
+        const std::size_t line_end = gcode.find('\n', pos);
+        const std::size_t this_end = (line_end == std::string::npos) ? gcode.size() : line_end;
+        const std::string line = gcode.substr(pos, this_end - pos);
+
+        if (!in_block && pos >= marker_pos)
+            in_block = true;
+
+        if (auto zv = extract_axis_value(line, 'Z'))
+            current_z = *zv;
+
+        if (in_block && line.rfind("G1 ", 0) == 0 &&
+            (extract_axis_value(line, 'X') || extract_axis_value(line, 'Y')) &&
+            extract_axis_value(line, 'E'))
+            return current_z; // first printing extrusion move; layer Z already established
+
+        if (line_end == std::string::npos) break;
+        pos = line_end + 1;
+    }
+    return current_z;
+}
+
+TEST_CASE("InitialLayers: flow_ratio_for_layer returns per-layer ratio with 1.0 fallback", "[InitialLayers]")
+{
+    // Default session: layer 0 = 0.90, all others = 1.0.
+    DrawSession def;
+    REQUIRE_THAT(def.flow_ratio_for_layer(0), Catch::Matchers::WithinRel(0.90, 1e-9));
+    REQUIRE_THAT(def.flow_ratio_for_layer(1), Catch::Matchers::WithinRel(1.0, 1e-9));
+    REQUIRE_THAT(def.flow_ratio_for_layer(5), Catch::Matchers::WithinRel(1.0, 1e-9));
+
+    // Custom three-entry vector.
+    DrawSession s;
+    s.initial_layer_flow_ratios = { 0.8, 0.9, 1.0 };
+    REQUIRE_THAT(s.flow_ratio_for_layer(0), Catch::Matchers::WithinRel(0.8, 1e-9));
+    REQUIRE_THAT(s.flow_ratio_for_layer(1), Catch::Matchers::WithinRel(0.9, 1e-9));
+    REQUIRE_THAT(s.flow_ratio_for_layer(2), Catch::Matchers::WithinRel(1.0, 1e-9));
+    // Beyond the configured initial layers -> 1.0 (no reduction).
+    REQUIRE_THAT(s.flow_ratio_for_layer(3),  Catch::Matchers::WithinRel(1.0, 1e-9));
+    REQUIRE_THAT(s.flow_ratio_for_layer(99), Catch::Matchers::WithinRel(1.0, 1e-9));
+    // Negative index -> 1.0 (no clamping/abort).
+    REQUIRE_THAT(s.flow_ratio_for_layer(-1), Catch::Matchers::WithinRel(1.0, 1e-9));
+}
+
+TEST_CASE("InitialLayers: generator scales each initial layer's extrusion independently", "[InitialLayers]")
+{
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+    // Relative E so per-G1 E values are per-segment deltas (independent of cumulative Z growth).
+    cfg.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
+
+    const double e_per_mm = (0.4 * 0.2) / (M_PI * (1.75 / 2.0) * (1.75 / 2.0));
+    const double base_E   = e_per_mm * 10.0; // a full-flow 10 mm extrusion
+
+    DrawSession session = make_n_layer_line_session(3);
+    session.initial_layer_flow_ratios = { 0.8, 0.9, 1.0 };
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 0), Catch::Matchers::WithinRel(base_E * 0.8, 1e-3));
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 1), Catch::Matchers::WithinRel(base_E * 0.9, 1e-3));
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 2), Catch::Matchers::WithinRel(base_E * 1.0, 1e-3));
+}
+
+TEST_CASE("InitialLayers: reflow_layer_z applies height overrides cumulatively", "[InitialLayers]")
+{
+    // Three natural 0.2 mm layers -> 0.2 / 0.4 / 0.6.
+    DrawSession s = make_n_layer_line_session(3, 0.2);
+    s.reflow_layer_z();
+    REQUIRE_THAT(s.layers[0].z_end, Catch::Matchers::WithinAbs(0.2, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end, Catch::Matchers::WithinAbs(0.4, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end, Catch::Matchers::WithinAbs(0.6, 1e-9));
+
+    // Override layer 0 -> 0.3, layer 1 -> "no override" (0.0). Layer 2 has no entry.
+    s.initial_layer_heights = { 0.3, 0.0 };
+    s.reflow_layer_z();
+    REQUIRE_THAT(s.layers[0].z_start, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    REQUIRE_THAT(s.layers[0].z_end,   Catch::Matchers::WithinAbs(0.3, 1e-9)); // override 0.3
+    REQUIRE_THAT(s.layers[1].z_start, Catch::Matchers::WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end,   Catch::Matchers::WithinAbs(0.5, 1e-9)); // natural 0.2
+    REQUIRE_THAT(s.layers[2].z_start, Catch::Matchers::WithinAbs(0.5, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end,   Catch::Matchers::WithinAbs(0.7, 1e-9)); // natural 0.2
+
+    // Changing layer 0's override re-flows everything above it.
+    s.initial_layer_heights = { 0.1, 0.0 };
+    s.reflow_layer_z();
+    REQUIRE_THAT(s.layers[0].z_end, Catch::Matchers::WithinAbs(0.1, 1e-9));
+    REQUIRE_THAT(s.layers[1].z_end, Catch::Matchers::WithinAbs(0.3, 1e-9));
+    REQUIRE_THAT(s.layers[2].z_end, Catch::Matchers::WithinAbs(0.5, 1e-9));
+}
+
+TEST_CASE("InitialLayers: generated G-code Z reflects per-layer height overrides", "[InitialLayers]")
+{
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+
+    DrawSession session = make_n_layer_line_session(3, 0.2);
+    session.initial_layer_heights = { 0.3 }; // override only layer 0
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    // Each layer prints at its top Z (z_end). With layer 0 overridden to 0.3 mm,
+    // the cumulative stack becomes 0.3 / 0.5 / 0.7.
+    const double z0 = layer_block_z(gcode, 0);
+    const double z1 = layer_block_z(gcode, 1);
+    const double z2 = layer_block_z(gcode, 2);
+    REQUIRE(z0 > 0.0);
+    REQUIRE_THAT(z0, Catch::Matchers::WithinAbs(0.3, 1e-6));
+    REQUIRE_THAT(z1, Catch::Matchers::WithinAbs(0.5, 1e-6));
+    REQUIRE_THAT(z2, Catch::Matchers::WithinAbs(0.7, 1e-6));
+    // The override raised the layer-0 height above its natural 0.2 mm.
+    REQUIRE(z1 - z0 > 0.0);
+}
+
+// Edge cases: N=0 (empty ratios) means every layer extrudes at full flow; an empty
+// session reflow is a safe no-op; height entries beyond a layer's index are ignored.
+TEST_CASE("InitialLayers: edge cases (empty ratios, empty session, oversized heights)", "[InitialLayers]")
+{
+    // N = 0: empty ratios vector -> flow_ratio_for_layer returns 1.0 for any index.
+    DrawSession z;
+    z.initial_layer_flow_ratios.clear();
+    REQUIRE_THAT(z.flow_ratio_for_layer(0), Catch::Matchers::WithinRel(1.0, 1e-9));
+    REQUIRE_THAT(z.flow_ratio_for_layer(3), Catch::Matchers::WithinRel(1.0, 1e-9));
+
+    // Empty-session reflow must not crash and leaves the session empty.
+    DrawSession empty;
+    REQUIRE(empty.layers.empty());
+    empty.reflow_layer_z();
+    REQUIRE(empty.layers.empty());
+
+    // N = 0 in the generator: a 2-layer session with no ratios -> both layers full flow.
+    {
+        DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
+        cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+        cfg.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
+        const double e_per_mm = (0.4 * 0.2) / (M_PI * (1.75 / 2.0) * (1.75 / 2.0));
+        const double base_E   = e_per_mm * 10.0;
+
+        DrawSession s = make_n_layer_line_session(2);
+        s.initial_layer_flow_ratios.clear(); // N = 0
+        DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+        const std::string gcode = gen.generate(s);
+        REQUIRE_THAT(sum_layer_extrusion(gcode, 0), Catch::Matchers::WithinRel(base_E, 1e-3));
+        REQUIRE_THAT(sum_layer_extrusion(gcode, 1), Catch::Matchers::WithinRel(base_E, 1e-3));
+    }
+
+    // Height entries beyond the layer count are simply ignored (no crash, no effect).
+    DrawSession few = make_n_layer_line_session(1, 0.2);
+    few.initial_layer_heights = { 0.0, 0.5, 0.9 }; // entry 0 is "no override"; 1,2 have no layer
+    few.reflow_layer_z();
+    REQUIRE(few.layers.size() == 1);
+    REQUIRE_THAT(few.layers[0].z_end, Catch::Matchers::WithinAbs(0.2, 1e-9)); // natural height kept
 }
 
 // ===========================================================================
@@ -2068,7 +2256,7 @@ TEST_CASE("DrawCoast: coasting on a line stops extrusion early but reaches the e
     const double E_per_mm = (0.4 * 0.2) / (M_PI * (1.75 / 2.0) * (1.75 / 2.0));
 
     DrawSession session;
-    session.first_layer_flow_ratio = 1.0; // avoid elephant-foot scaling
+    session.initial_layer_flow_ratios = {1.0}; // avoid elephant-foot scaling
     session.wipe_enabled           = false;
     session.coast_distance_mm      = 2.0;
     session.add_layer(0.2);
@@ -2104,7 +2292,7 @@ TEST_CASE("DrawCoast: coasting on arc and bezier reduces trailing extrusion with
 
     auto make_curve_session = [](DrawSegment seg, double coast) {
         DrawSession s;
-        s.first_layer_flow_ratio = 1.0;
+        s.initial_layer_flow_ratios = {1.0};
         s.wipe_enabled           = false;
         s.coast_distance_mm      = coast;
         s.add_layer(0.2);

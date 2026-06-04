@@ -2,6 +2,7 @@
 
 #include <wx/panel.h>
 #include <wx/sizer.h>
+#include <wx/wrapsizer.h>
 #include <wx/stattext.h>
 #include <wx/button.h>
 #include <wx/tglbtn.h>
@@ -15,6 +16,7 @@
 #include "libslic3r/DrawModeFeedback.hpp"
 #include "DrawModeCommands.hpp"
 #include "DrawModeInputHandler.hpp"
+#include "DrawLayerSlider.hpp"
 
 #include <memory>
 #include <optional>
@@ -75,7 +77,14 @@ private:
     wxChoice*          m_grid_res_choice{ nullptr }; // snap grid resolution selector
     wxChoice*          m_arc_res_choice { nullptr }; // arc/bezier segment resolution
     wxCheckBox*        m_native_arc_chk { nullptr }; // emit G2/G3 for circular arcs
-    wxSpinCtrl*        m_first_layer_flow_spin { nullptr }; // layer-0 flow % (elephant's foot)
+    // Initial-layers group: N configurable initial layers, each with its own flow %
+    // and height override. A fixed pool of up to 8 rows is created once and the first
+    // N are shown (the rest hidden) so sizer items are never added/removed dynamically.
+    static constexpr int kMaxInitialLayers = 8;
+    wxSpinCtrl*        m_initial_layer_count_spin { nullptr }; // N (0..8)
+    wxSpinCtrl*        m_initial_flow_spin[kMaxInitialLayers]   { }; // per-layer flow %
+    wxSpinCtrlDouble*  m_initial_height_spin[kMaxInitialLayers] { }; // per-layer height (mm)
+    wxSizer*           m_initial_layer_rows[kMaxInitialLayers]  { }; // per-row sizers (show/hide)
     wxCheckBox*        m_wipe_check     { nullptr }; // wipe backward while retracting (anti-blob)
     wxSpinCtrlDouble*  m_wipe_dist_spin { nullptr }; // wipe distance (mm)
     wxSpinCtrlDouble*  m_coast_spin     { nullptr }; // coast distance (mm); PA-incompatible
@@ -96,6 +105,10 @@ private:
     wxButton*          m_clear_btn      { nullptr };
     wxButton*          m_simulate_btn   { nullptr };
     wxButton*          m_finalize_btn   { nullptr };
+
+    // Responsive grouped toolbar (wxWrapSizer) + vertical layer slider.
+    wxWrapSizer*       m_toolbar        { nullptr };
+    DrawLayerSlider*   m_layer_slider   { nullptr };
 
     // Tool selection for drawing mode
     wxToggleButton*    m_line_tool_btn  { nullptr };
@@ -200,6 +213,12 @@ private:
     bool restore_existing_draw_object(PartPlate* plate);
     void update_banner();
     void update_layer_label();
+    // Build a labeled, bordered tool group (wxStaticBoxSizer) for the responsive toolbar.
+    wxSizer* make_tool_group(const wxString& title, std::vector<wxWindow*> items);
+    // Push the current layer set + active layer into the slider (called after layer mutations).
+    void refresh_layer_slider();
+    // Slider callback: apply a requested active-layer change from the slider.
+    void on_slider_layer_change(int new_index);
     void dispatch_command(std::unique_ptr<DrawCommand> cmd);
 
     // Coordinate conversion between canvas pixels and plate-space mm
@@ -239,7 +258,15 @@ private:
     void on_grid_res_change(wxCommandEvent& evt);
     void on_arc_res_change(wxCommandEvent& evt);
     void on_native_arc_toggle(wxCommandEvent& evt);
-    void on_first_layer_flow_change(wxCommandEvent& evt);
+    void on_initial_layer_count_change(wxCommandEvent& evt);
+    void on_initial_layer_param_change(wxCommandEvent& evt);
+    // Rebuild m_session.initial_layer_flow_ratios / initial_layer_heights from the UI
+    // spins (sized to N), reflow layer Z, and refresh the canvas/preview.
+    void rebuild_initial_layers_from_ui();
+    // Show the first N initial-layer rows and hide the rest.
+    void update_initial_layer_rows_visibility(int n);
+    // Profile layer height (mm) from the active print preset, fallback 0.2.
+    double profile_layer_height() const;
     void on_wipe_toggle(wxCommandEvent& evt);
     void on_wipe_dist_change(wxCommandEvent& evt);
     void on_coast_change(wxCommandEvent& evt);

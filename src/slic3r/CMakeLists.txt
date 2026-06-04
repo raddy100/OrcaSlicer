@@ -113,6 +113,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/DrawModeInputHandler.cpp
     GUI/DrawModePanel.hpp
     GUI/DrawModePanel.cpp
+    GUI/DrawLayerSlider.hpp
+    GUI/DrawLayerSlider.cpp
     GUI/EditGCodeDialog.cpp
     GUI/EditGCodeDialog.hpp
     GUI/EncodedFilament.hpp

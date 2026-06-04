@@ -2613,6 +2613,38 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
     }
 
+    // Join a vector<double> into a compact CSV string (e.g. "0.9,1,1").
+    static std::string draw_csv_join(const std::vector<double>& v)
+    {
+        std::ostringstream oss;
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (i) oss << ',';
+            oss << v[i];
+        }
+        return oss.str();
+    }
+
+    // Split a CSV string into a vector<double>. Robust to empty/whitespace entries
+    // (blank or malformed tokens are skipped).
+    static std::vector<double> draw_csv_split(const std::string& s)
+    {
+        std::vector<double> out;
+        std::string         token;
+        std::istringstream  iss(s);
+        while (std::getline(iss, token, ',')) {
+            const size_t a = token.find_first_not_of(" \t\r\n");
+            if (a == std::string::npos) continue;
+            const size_t b = token.find_last_not_of(" \t\r\n");
+            token = token.substr(a, b - a + 1);
+            try {
+                out.push_back(std::stod(token));
+            } catch (...) {
+                // skip malformed token
+            }
+        }
+        return out;
+    }
+
     void _BBS_3MF_Importer::_extract_draw_session_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, const std::string& filename)
     {
         // Parse the 1-based object index from "Metadata/draw_session_obj_<N>.xml"
@@ -2646,7 +2678,19 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             const pt::ptree& ds_tree = tree.get_child("draw_session");
             session.curve_tolerance_mm = ds_tree.get<double>("<xmlattr>.curve_tolerance_mm", 0.05);
             session.native_arc_output  = ds_tree.get<int>("<xmlattr>.native_arc_output", 0) != 0;
-            session.first_layer_flow_ratio = ds_tree.get<double>("<xmlattr>.first_layer_flow_ratio", 0.90);
+            // Per-initial-layer arrays (new format). If the new attribute is absent,
+            // migrate from the legacy single scalar so old files still apply layer-0
+            // elephant's-foot compensation.
+            {
+                std::vector<double> ratios  = draw_csv_split(ds_tree.get<std::string>("<xmlattr>.initial_layer_flow_ratios", ""));
+                std::vector<double> heights = draw_csv_split(ds_tree.get<std::string>("<xmlattr>.initial_layer_heights", ""));
+                if (ratios.empty()) {
+                    const double legacy = ds_tree.get<double>("<xmlattr>.first_layer_flow_ratio", 0.90);
+                    ratios = { legacy };
+                }
+                session.initial_layer_flow_ratios = std::move(ratios);
+                session.initial_layer_heights     = std::move(heights);
+            }
             session.wipe_enabled       = ds_tree.get<int>("<xmlattr>.wipe_enabled", 1) != 0;
             session.wipe_distance_mm   = ds_tree.get<double>("<xmlattr>.wipe_distance_mm", 1.0);
             session.coast_distance_mm  = ds_tree.get<double>("<xmlattr>.coast_distance_mm", 0.0);
@@ -7495,7 +7539,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             root.put("<xmlattr>.layer_count", session.layer_count());
             root.put("<xmlattr>.curve_tolerance_mm", session.curve_tolerance_mm);
             root.put("<xmlattr>.native_arc_output",  session.native_arc_output ? 1 : 0);
-            root.put("<xmlattr>.first_layer_flow_ratio", session.first_layer_flow_ratio);
+            // Per-initial-layer arrays (new format). Heights are omitted when empty.
+            root.put("<xmlattr>.initial_layer_flow_ratios", draw_csv_join(session.initial_layer_flow_ratios));
+            if (!session.initial_layer_heights.empty())
+                root.put("<xmlattr>.initial_layer_heights", draw_csv_join(session.initial_layer_heights));
+            // Legacy attribute for downgrade compatibility: older builds still read this
+            // single scalar and apply layer-0 elephant's-foot compensation.
+            root.put("<xmlattr>.first_layer_flow_ratio",
+                     session.initial_layer_flow_ratios.empty() ? 0.90 : session.initial_layer_flow_ratios[0]);
             root.put("<xmlattr>.wipe_enabled",      session.wipe_enabled ? 1 : 0);
             root.put("<xmlattr>.wipe_distance_mm",  session.wipe_distance_mm);
             root.put("<xmlattr>.coast_distance_mm", session.coast_distance_mm);

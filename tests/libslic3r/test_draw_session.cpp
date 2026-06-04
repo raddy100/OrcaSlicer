@@ -7,9 +7,13 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/miniz_extension.hpp"
 
 #include <boost/filesystem/operations.hpp>
 #include <memory>
+#include <string>
+#include <vector>
+#include <cstring>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -208,8 +212,9 @@ TEST_CASE("Draw3mf: round-trip preserves draw session", "[Draw3mf]")
     fs::remove(tmp); // clean up any stale file from a previous crashed run
 
     DynamicPrintConfig store_cfg; // empty config is sufficient for geometry only
+    const std::string tmp_path = tmp.string();
     StoreParams sp;
-    sp.path   = tmp.string().c_str();
+    sp.path   = tmp_path.c_str();
     sp.model  = &src_model;
     sp.config = &store_cfg;
     // plate_data_list defaults to empty: draw sessions are per-object metadata
@@ -304,7 +309,7 @@ TEST_CASE("Draw3mf: round-trip preserves wipe/coast/flow scalar fields", "[Draw3
     src_session->wipe_enabled           = false; // default is true
     src_session->wipe_distance_mm       = 2.5;   // default is 1.0
     src_session->coast_distance_mm      = 1.5;   // default is 0.0
-    src_session->first_layer_flow_ratio = 0.75;  // default is 0.90
+    src_session->initial_layer_flow_ratios = { 0.75 }; // default is {0.90}
     obj->draw_session = std::move(src_session);
 
     namespace fs = boost::filesystem;
@@ -312,8 +317,9 @@ TEST_CASE("Draw3mf: round-trip preserves wipe/coast/flow scalar fields", "[Draw3
     fs::remove(tmp);
 
     DynamicPrintConfig store_cfg;
+    const std::string tmp_path = tmp.string();
     StoreParams sp;
-    sp.path   = tmp.string().c_str();
+    sp.path   = tmp_path.c_str();
     sp.model  = &src_model;
     sp.config = &store_cfg;
     REQUIRE(store_bbs_3mf(sp));
@@ -326,7 +332,7 @@ TEST_CASE("Draw3mf: round-trip preserves wipe/coast/flow scalar fields", "[Draw3
     bool is_bbl = false, is_orca = false;
     Semver ver;
     const bool loaded = load_bbs_3mf(
-        tmp.string().c_str(), &dst_cfg, &ctx, &dst_model, &plate_data,
+        tmp_path.c_str(), &dst_cfg, &ctx, &dst_model, &plate_data,
         /*project_presets=*/nullptr, &is_bbl, &is_orca, &ver,
         /*proFn=*/nullptr, LoadStrategy::LoadModel);
     fs::remove(tmp);
@@ -340,7 +346,8 @@ TEST_CASE("Draw3mf: round-trip preserves wipe/coast/flow scalar fields", "[Draw3
     REQUIRE(dst.wipe_enabled == false);
     REQUIRE_THAT(dst.wipe_distance_mm,       WithinAbs(2.5,  1e-9));
     REQUIRE_THAT(dst.coast_distance_mm,      WithinAbs(1.5,  1e-9));
-    REQUIRE_THAT(dst.first_layer_flow_ratio, WithinAbs(0.75, 1e-9));
+    REQUIRE(dst.initial_layer_flow_ratios.size() == 1);
+    REQUIRE_THAT(dst.initial_layer_flow_ratios[0], WithinAbs(0.75, 1e-9));
 }
 
 // A DrawSession constructed without any 3MF attributes (mirroring a legacy file
@@ -351,7 +358,187 @@ TEST_CASE("Draw3mf: legacy/default session exposes wipe-coast back-compat defaul
     REQUIRE(s.wipe_enabled == true);
     REQUIRE_THAT(s.wipe_distance_mm,       WithinAbs(1.0, 1e-9));
     REQUIRE_THAT(s.coast_distance_mm,      WithinAbs(0.0, 1e-9));
-    REQUIRE_THAT(s.first_layer_flow_ratio, WithinAbs(0.90, 1e-9));
+    REQUIRE(s.initial_layer_flow_ratios.size() == 1);
+    REQUIRE_THAT(s.initial_layer_flow_ratios[0], WithinAbs(0.90, 1e-9));
+    REQUIRE(s.initial_layer_heights.empty());
+}
+
+// Round-trips a model with a single draw-path object through a temporary .3mf and
+// returns the loaded session (caller asserts on its contents). Returns false on failure.
+static bool roundtrip_draw_session(const DrawSession& src, DrawSession& out,
+                                   const boost::filesystem::path& tmp)
+{
+    namespace fs = boost::filesystem;
+    Model src_model;
+    ModelObject* obj = src_model.add_object("RT", "", make_cube(10.0, 10.0, 10.0));
+    obj->add_instance();
+    obj->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+    obj->draw_session = std::make_unique<DrawSession>(src);
+
+    fs::remove(tmp);
+    DynamicPrintConfig store_cfg;
+    const std::string tmp_path = tmp.string();
+    StoreParams sp;
+    sp.path   = tmp_path.c_str();
+    sp.model  = &src_model;
+    sp.config = &store_cfg;
+    if (!store_bbs_3mf(sp) || !fs::exists(tmp))
+        return false;
+
+    Model dst_model;
+    DynamicPrintConfig dst_cfg;
+    ConfigSubstitutionContext ctx{ ForwardCompatibilitySubstitutionRule::Disable };
+    PlateDataPtrs plate_data;
+    bool is_bbl = false, is_orca = false;
+    Semver ver;
+    const bool loaded = load_bbs_3mf(
+        tmp_path.c_str(), &dst_cfg, &ctx, &dst_model, &plate_data,
+        nullptr, &is_bbl, &is_orca, &ver, nullptr, LoadStrategy::LoadModel);
+    release_PlateData_list(plate_data);
+    if (!loaded || dst_model.objects.size() != 1 || !dst_model.objects[0]->draw_session)
+        return false;
+    out = *dst_model.objects[0]->draw_session;
+    return true;
+}
+
+TEST_CASE("Draw3mf: round-trip preserves per-initial-layer flow ratios and heights", "[Draw3mf][InitialLayers]")
+{
+    namespace fs = boost::filesystem;
+    DrawSession src;
+    src.add_layer(0.2);
+    src.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
+    src.initial_layer_flow_ratios = { 0.85, 0.95 };
+    src.initial_layer_heights     = { 0.3, 0.15 };
+
+    DrawSession dst;
+    const fs::path tmp = fs::temp_directory_path() / "orca_test_initial_layers_roundtrip.3mf";
+    REQUIRE(roundtrip_draw_session(src, dst, tmp));
+    fs::remove(tmp);
+
+    REQUIRE(dst.initial_layer_flow_ratios.size() == 2);
+    REQUIRE_THAT(dst.initial_layer_flow_ratios[0], WithinAbs(0.85, 1e-9));
+    REQUIRE_THAT(dst.initial_layer_flow_ratios[1], WithinAbs(0.95, 1e-9));
+    REQUIRE(dst.initial_layer_heights.size() == 2);
+    REQUIRE_THAT(dst.initial_layer_heights[0], WithinAbs(0.30, 1e-9));
+    REQUIRE_THAT(dst.initial_layer_heights[1], WithinAbs(0.15, 1e-9));
+}
+
+TEST_CASE("Draw3mf: default session round-trips to {0.90} with empty heights", "[Draw3mf][InitialLayers]")
+{
+    namespace fs = boost::filesystem;
+    DrawSession src; // default: {0.90} / empty
+    src.add_layer(0.2);
+    src.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
+
+    DrawSession dst;
+    const fs::path tmp = fs::temp_directory_path() / "orca_test_initial_layers_default.3mf";
+    REQUIRE(roundtrip_draw_session(src, dst, tmp));
+    fs::remove(tmp);
+
+    REQUIRE(dst.initial_layer_flow_ratios.size() == 1);
+    REQUIRE_THAT(dst.initial_layer_flow_ratios[0], WithinAbs(0.90, 1e-9));
+    REQUIRE(dst.initial_layer_heights.empty());
+}
+
+// Remove every occurrence of an XML attribute (name="...") from a string, including
+// the single leading space. Used to forge a "legacy" draw_session entry.
+static void strip_xml_attr(std::string& xml, const std::string& name)
+{
+    const std::string key = name + "=\"";
+    size_t p;
+    while ((p = xml.find(key)) != std::string::npos) {
+        const size_t q = xml.find('"', p + key.size());
+        if (q == std::string::npos) break;
+        size_t begin = p;
+        if (begin > 0 && xml[begin - 1] == ' ') --begin;
+        xml.erase(begin, (q + 1) - begin);
+    }
+}
+
+TEST_CASE("Draw3mf: legacy file with only first_layer_flow_ratio migrates to {legacy}", "[Draw3mf][InitialLayers]")
+{
+    namespace fs = boost::filesystem;
+
+    // 1) Store a normal 3MF whose layer-0 ratio is 0.8 (so the legacy attribute is 0.8).
+    DrawSession src;
+    src.add_layer(0.2);
+    src.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
+    src.initial_layer_flow_ratios = { 0.8 };
+    src.initial_layer_heights     = {};
+
+    Model src_model;
+    ModelObject* obj = src_model.add_object("Legacy", "", make_cube(10.0, 10.0, 10.0));
+    obj->add_instance();
+    obj->config.set_key_value("draw_path_object", new ConfigOptionBool(true));
+    obj->draw_session = std::make_unique<DrawSession>(src);
+
+    const fs::path tmp = fs::temp_directory_path() / "orca_test_initial_layers_legacy.3mf";
+    fs::remove(tmp);
+    DynamicPrintConfig store_cfg;
+    const std::string tmp_path = tmp.string();
+    StoreParams sp;
+    sp.path   = tmp_path.c_str();
+    sp.model  = &src_model;
+    sp.config = &store_cfg;
+    REQUIRE(store_bbs_3mf(sp));
+    REQUIRE(fs::exists(tmp));
+
+    // 2) Rewrite the archive, stripping the NEW attributes from the draw_session XML so
+    //    only the legacy first_layer_flow_ratio remains (simulating an older file).
+    const fs::path legacy = fs::temp_directory_path() / "orca_test_initial_layers_legacy_only.3mf";
+    fs::remove(legacy);
+    {
+        mz_zip_archive zin;  std::memset(&zin, 0, sizeof(zin));
+        mz_zip_archive zout; std::memset(&zout, 0, sizeof(zout));
+        REQUIRE(mz_zip_reader_init_file(&zin, tmp.string().c_str(), 0));
+        REQUIRE(mz_zip_writer_init_file(&zout, legacy.string().c_str(), 0));
+
+        const mz_uint n = mz_zip_reader_get_num_files(&zin);
+        for (mz_uint i = 0; i < n; ++i) {
+            mz_zip_archive_file_stat st;
+            REQUIRE(mz_zip_reader_file_stat(&zin, i, &st));
+            size_t sz = 0;
+            void* p = mz_zip_reader_extract_to_heap(&zin, i, &sz, 0);
+            REQUIRE(p != nullptr);
+            std::string data(static_cast<char*>(p), sz);
+            mz_free(p);
+
+            if (std::string(st.m_filename).find("draw_session_obj_") != std::string::npos) {
+                strip_xml_attr(data, "initial_layer_flow_ratios");
+                strip_xml_attr(data, "initial_layer_heights");
+                // Sanity: the legacy attribute must survive.
+                REQUIRE(data.find("first_layer_flow_ratio=\"") != std::string::npos);
+                REQUIRE(data.find("initial_layer_flow_ratios=\"") == std::string::npos);
+            }
+            REQUIRE(mz_zip_writer_add_mem(&zout, st.m_filename, data.data(), data.size(),
+                                          MZ_DEFAULT_COMPRESSION));
+        }
+        REQUIRE(mz_zip_writer_finalize_archive(&zout));
+        mz_zip_writer_end(&zout);
+        mz_zip_reader_end(&zin);
+    }
+    fs::remove(tmp);
+
+    // 3) Load the forged legacy file: migration yields {0.8} and empty heights.
+    Model dst_model;
+    DynamicPrintConfig dst_cfg;
+    ConfigSubstitutionContext ctx{ ForwardCompatibilitySubstitutionRule::Disable };
+    PlateDataPtrs plate_data;
+    bool is_bbl = false, is_orca = false;
+    Semver ver;
+    const bool loaded = load_bbs_3mf(
+        legacy.string().c_str(), &dst_cfg, &ctx, &dst_model, &plate_data,
+        nullptr, &is_bbl, &is_orca, &ver, nullptr, LoadStrategy::LoadModel);
+    fs::remove(legacy);
+    release_PlateData_list(plate_data);
+
+    REQUIRE(loaded);
+    REQUIRE(dst_model.objects.size() == 1);
+    REQUIRE(dst_model.objects[0]->draw_session != nullptr);
+    const DrawSession& dst = *dst_model.objects[0]->draw_session;
+    REQUIRE(dst.initial_layer_flow_ratios.size() == 1);
+    REQUIRE_THAT(dst.initial_layer_flow_ratios[0], WithinAbs(0.8, 1e-9));
+    REQUIRE(dst.initial_layer_heights.empty());
 }
 
 // ---------------------------------------------------------------------------

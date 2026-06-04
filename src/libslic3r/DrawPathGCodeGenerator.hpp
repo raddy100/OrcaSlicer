@@ -65,10 +65,11 @@ private:
     double m_curve_tol  { 0.05 };  // max chord-to-curve deviation (mm)
     bool   m_native_arc { false }; // emit G2/G3 for circular arcs
 
-    // Elephant's-foot mitigation: layer-0 extrusion scale (1.0 = no reduction).
-    // Set per-session (clamped); m_layer_flow_mult is the value applied to the
-    // layer currently being generated (m_first_layer_flow_ratio on layer 0, else 1.0).
-    double m_first_layer_flow_ratio { 0.90 };
+    // Elephant's-foot mitigation extended to N initial layers: per-layer extrusion
+    // scale (1.0 = no reduction). Set per-session (copied from the session); index =
+    // layer_index. Layers at/above the vector size use 1.0. m_layer_flow_mult is the
+    // clamped value applied to the layer currently being generated.
+    std::vector<double> m_initial_layer_flow_ratios { 0.90 };
     double m_layer_flow_mult        { 1.0 };
 
     // Anti-blob wipe + optional coasting settings, captured per-session.

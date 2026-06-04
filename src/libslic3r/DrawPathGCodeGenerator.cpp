@@ -54,9 +54,14 @@ DrawPathGCodeGenerator::DrawPathGCodeGenerator(const DynamicPrintConfig& full_co
 // Public API
 // ---------------------------------------------------------------------------
 
-std::string DrawPathGCodeGenerator::generate(const DrawSession& session,
+std::string DrawPathGCodeGenerator::generate(const DrawSession& session_in,
                                               const Vec2d&       instance_offset)
 {
+    // Work on a local mutable copy so per-initial-layer height overrides can be baked
+    // into the layer Z values without mutating the caller's const session.
+    DrawSession session = session_in;
+    session.reflow_layer_z();
+
     if (session.is_empty()) {
         m_pending_wipe.reset();
         return generate_preamble(session) + generate_postamble(session);
@@ -68,7 +73,7 @@ std::string DrawPathGCodeGenerator::generate(const DrawSession& session,
     // Capture per-session settings before generating layers.
     m_curve_tol  = session.curve_tolerance_mm;
     m_native_arc = session.native_arc_output;
-    m_first_layer_flow_ratio = std::clamp(session.first_layer_flow_ratio, 0.1, 1.5);
+    m_initial_layer_flow_ratios = session.initial_layer_flow_ratios;
     m_wipe_enabled      = session.wipe_enabled;
     m_wipe_distance_mm  = std::max(0.0, session.wipe_distance_mm);
     m_coast_distance_mm = std::max(0.0, session.coast_distance_mm);
@@ -109,25 +114,34 @@ std::string DrawPathGCodeGenerator::generate_batch(const std::vector<BatchItem>&
         return gcode;
     }
 
-    gcode += generate_preamble(*first_nonempty);
+    // Reflowed copy of the first non-empty session, used for preamble/postamble
+    // (e.g. max_layer_z) so height overrides are reflected in the shared envelope.
+    DrawSession first_reflowed = *first_nonempty;
+    first_reflowed.reflow_layer_z();
+
+    gcode += generate_preamble(first_reflowed);
 
     for (const auto& [sess, inst_offset] : items) {
         if (!sess || sess->is_empty()) continue;
+        // Work on a reflowed copy so height overrides bake into Z without mutating
+        // the caller's const session.
+        DrawSession reflowed = *sess;
+        reflowed.reflow_layer_z();
         // Update per-session settings for this batch item's layers.
-        m_curve_tol  = sess->curve_tolerance_mm;
-        m_native_arc = sess->native_arc_output;
-        m_first_layer_flow_ratio = std::clamp(sess->first_layer_flow_ratio, 0.1, 1.5);
-        m_wipe_enabled      = sess->wipe_enabled;
-        m_wipe_distance_mm  = std::max(0.0, sess->wipe_distance_mm);
-        m_coast_distance_mm = std::max(0.0, sess->coast_distance_mm);
+        m_curve_tol  = reflowed.curve_tolerance_mm;
+        m_native_arc = reflowed.native_arc_output;
+        m_initial_layer_flow_ratios = reflowed.initial_layer_flow_ratios;
+        m_wipe_enabled      = reflowed.wipe_enabled;
+        m_wipe_distance_mm  = std::max(0.0, reflowed.wipe_distance_mm);
+        m_coast_distance_mm = std::max(0.0, reflowed.coast_distance_mm);
         m_pending_wipe.reset();
         const Vec2d abs_offset = m_plate_origin + inst_offset;
-        for (const DrawLayer& layer : sess->layers) {
+        for (const DrawLayer& layer : reflowed.layers) {
             gcode += generate_layer(layer, abs_offset);
         }
     }
 
-    gcode += generate_postamble(*first_nonempty);
+    gcode += generate_postamble(first_reflowed);
     return gcode;
 }
 
@@ -445,9 +459,12 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
 
     const bool is_first = (layer.layer_index == 0);
 
-    // Elephant's-foot mitigation: starve only the first layer's extrusion so the
-    // bottom bead has less material to bulge sideways. XY toolpath is unchanged.
-    m_layer_flow_mult = is_first ? m_first_layer_flow_ratio : 1.0;
+    // Per-initial-layer elephant's-foot mitigation: starve the configured initial
+    // layers' extrusion so the bottom beads have less material to bulge sideways.
+    // XY toolpath is unchanged. Layers beyond the configured initial layers use 1.0.
+    double r = (layer.layer_index >= 0 && layer.layer_index < (int)m_initial_layer_flow_ratios.size())
+               ? m_initial_layer_flow_ratios[layer.layer_index] : 1.0;
+    m_layer_flow_mult = std::clamp(r, 0.1, 1.5);
 
     // Temperature for this layer.
     const int temp = is_first

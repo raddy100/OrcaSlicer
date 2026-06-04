@@ -100,6 +100,26 @@ double DrawSession::total_height() const
     return layers.back().z_end;
 }
 
+double DrawSession::flow_ratio_for_layer(int layer_index) const
+{
+    return (layer_index >= 0 && layer_index < (int)initial_layer_flow_ratios.size())
+               ? initial_layer_flow_ratios[layer_index]
+               : 1.0;
+}
+
+void DrawSession::reflow_layer_z()
+{
+    double z = 0.0;
+    for (size_t i = 0; i < layers.size(); ++i) {
+        double h = layers[i].layer_height();                 // natural height
+        if (i < initial_layer_heights.size() && initial_layer_heights[i] > 0.0)
+            h = initial_layer_heights[i];                    // override
+        layers[i].z_start = z;
+        layers[i].z_end   = z + h;
+        z = layers[i].z_end;
+    }
+}
+
 BoundingBoxf3 DrawSession::bounding_box() const
 {
     BoundingBoxf3 bbox;

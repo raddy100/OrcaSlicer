@@ -20,6 +20,8 @@
 #include <wx/dcbuffer.h>
 #include <wx/choice.h>
 #include <wx/checkbox.h>
+#include <wx/wrapsizer.h>
+#include <wx/statbox.h>
 
 #include <algorithm>
 #include <cmath>
@@ -82,7 +84,13 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_prev_layer_btn = new wxButton(this, wxID_ANY, "< Prev");
     m_layer_label    = new wxStaticText(this, wxID_ANY, "No layers",
         wxDefaultPosition, wxSize(240, -1), wxALIGN_CENTRE_HORIZONTAL);
+    m_layer_label->Hide();
     m_next_layer_btn = new wxButton(this, wxID_ANY, "Next >");
+    // The < Prev / Next > buttons and the standalone Layer label are replaced by the
+    // vertical layer slider (§3.3). Keep the widgets + handlers alive (the handler bodies
+    // contain valid navigation logic reused by keyboard) but remove them from the layout.
+    m_prev_layer_btn->Hide();
+    m_next_layer_btn->Hide();
     m_remove_layer_btn = new wxButton(this, wxID_ANY, "- Layer");
     m_add_layer_btn  = new wxButton(this, wxID_ANY, "+ Layer");
     m_insert_below_btn = new wxButton(this, wxID_ANY, "Insert Below");
@@ -149,13 +157,15 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
         "Emit native G2/G3 arc commands for circular arcs\n"
         "instead of G1 linearization.\n"
         "Has no effect on Bezier curves or straight lines.");
-    m_first_layer_flow_spin = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
-        wxDefaultPosition, wxSize(70, -1), wxSP_ARROW_KEYS, 50, 100, 90);
-    m_first_layer_flow_spin->SetToolTip(
-        "First-layer flow (%) \u2014 elephant's-foot compensation.\n"
-        "Scales only the bottom layer's extrusion so it bulges less\n"
-        "sideways. The drawn XY path is never moved, so dimensions\n"
-        "stay accurate. 100% = no reduction; default 90%.");
+    // Initial-layers group: a count spin (N) plus a fixed pool of up to 8 rows,
+    // each with a flow-% spin and a height(mm) spin. Rows are built in the layout
+    // section below; only the first N are shown.
+    m_initial_layer_count_spin = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+        wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, 0, kMaxInitialLayers, 1);
+    m_initial_layer_count_spin->SetToolTip(
+        "Number of initial layers (0\u20138) with independent flow and height.\n"
+        "Each initial layer can starve its extrusion (elephant's-foot\n"
+        "compensation) and override its height. Default 1.");
 
     // Anti-blob wipe + optional coasting controls (mirror the flow spin pattern).
     m_wipe_check = new wxCheckBox(this, wxID_ANY, "Wipe");
@@ -177,8 +187,8 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
         "end of a segment and travel the rest dry. Incompatible with\n"
         "firmware pressure/linear advance; keep at 0 when PA is on.\n"
         "Default 0.0 (off).");
-    m_measure_toggle = new wxToggleButton(this, wxID_ANY, "Show Measurements");
-    m_coord_toggle = new wxToggleButton(this, wxID_ANY, "Show Coordinates");
+    m_measure_toggle = new wxToggleButton(this, wxID_ANY, "Measure");
+    m_coord_toggle = new wxToggleButton(this, wxID_ANY, "Coords");
     m_length_input = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(90, -1), wxTE_PROCESS_ENTER);
     m_draw_toggle->SetValue(true);
     m_snap_toggle->SetValue(true); // snap on by default
@@ -202,58 +212,99 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_canvas->SetBackgroundColour(wxColour(55, 55, 55));
     m_canvas->SetCursor(wxCursor(wxCURSOR_CROSS));
 
-    // Layout
-    auto* top_sizer = new wxBoxSizer(wxHORIZONTAL);
-    top_sizer->Add(m_banner_text, 1, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_draw_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_edit_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_line_tool_btn,  0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_arc_tool_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_curve_tool_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_splice_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_fill_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_snap_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(new wxStaticText(this, wxID_ANY, "Grid:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_grid_res_choice, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(new wxStaticText(this, wxID_ANY, "Arc:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_arc_res_choice, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_native_arc_chk, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(new wxStaticText(this, wxID_ANY, "1st flow %:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_first_layer_flow_spin, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_wipe_check, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(new wxStaticText(this, wxID_ANY, "Wipe dist (mm):"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_wipe_dist_spin, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(new wxStaticText(this, wxID_ANY, "Coast (mm):"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_coast_spin, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_measure_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_coord_toggle, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(new wxStaticText(this, wxID_ANY, "Length:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_length_input, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_snip_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->AddStretchSpacer();
-    top_sizer->Add(m_clear_btn,    0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_simulate_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    top_sizer->Add(m_finalize_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    // ---- Locked tooltips for the regrouped toolbar (01_IMPLEMENTATION.md §3.2) ----
+    m_draw_toggle->SetToolTip("Switch to drawing mode");
+    m_edit_toggle->SetToolTip("Switch to edit mode");
+    m_snap_toggle->SetToolTip("Snap points to grid");
+    m_grid_res_choice->SetToolTip("Snap grid resolution (mm)");
+    m_arc_res_choice->SetToolTip("Arc/bezier segment resolution");
+    m_native_arc_chk->SetToolTip("Emit native G2/G3 for circular arcs");
+    m_fill_toggle->SetToolTip("Preview filled extrusion width");
+    m_length_input->SetToolTip("Type an exact segment length (mm)");
+    m_snip_btn->SetToolTip("Break the continuous chain");
+    m_wipe_check->SetToolTip("Wipe backward while retracting (anti-blob)");
+    m_wipe_dist_spin->SetToolTip("Wipe distance (mm)");
+    m_coast_spin->SetToolTip("Coast distance (mm); incompatible with pressure advance");
+    m_measure_toggle->SetToolTip("Show measurement overlays");
+    m_coord_toggle->SetToolTip("Show coordinate readout");
 
-    auto* nav_sizer = new wxBoxSizer(wxHORIZONTAL);
-    nav_sizer->Add(m_prev_layer_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_layer_label,      1, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_next_layer_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_remove_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_add_layer_btn,    0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_insert_below_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_delete_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_copy_layer_btn,  0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_paste_layer_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_copy_prev_btn,   0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
-    nav_sizer->Add(m_mirror_stack_btn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 4);
+    // Build the initial-layer rows (widgets created here; rows are shown/hidden by
+    // update_initial_layer_rows_visibility and live inside the Quality group below).
+    {
+        const double default_h = profile_layer_height();
+        for (int i = 0; i < kMaxInitialLayers; ++i) {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(this, wxID_ANY, wxString::Format("L%d flow%%:", i)),
+                     0, wxALL | wxALIGN_CENTER_VERTICAL, 2);
+            // Layer 0 defaults to 90% (elephant's foot); others default to 100%.
+            const int flow_default = (i == 0) ? 90 : 100;
+            m_initial_flow_spin[i] = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
+                wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, 10, 150, flow_default);
+            m_initial_flow_spin[i]->SetToolTip(
+                "Extrusion flow (%) for this initial layer. 100% = no reduction.");
+            row->Add(m_initial_flow_spin[i], 0, wxALL | wxALIGN_CENTER_VERTICAL, 2);
+            row->Add(new wxStaticText(this, wxID_ANY, "h(mm):"),
+                     0, wxALL | wxALIGN_CENTER_VERTICAL, 2);
+            m_initial_height_spin[i] = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
+                wxDefaultPosition, wxSize(70, -1), wxSP_ARROW_KEYS, 0.04, 1.0, default_h, 0.01);
+            m_initial_height_spin[i]->SetToolTip(
+                "Height (mm) override for this initial layer. Defaults to the\n"
+                "active profile's layer height.");
+            row->Add(m_initial_height_spin[i], 0, wxALL | wxALIGN_CENTER_VERTICAL, 2);
+            m_initial_layer_rows[i] = row;
+        }
+    }
+
+    // ---- Responsive grouped toolbar (wxWrapSizer of titled wxStaticBoxSizer groups) ----
+    m_toolbar = new wxWrapSizer(wxHORIZONTAL);
+    m_toolbar->Add(make_tool_group("Mode", { m_draw_toggle, m_edit_toggle }), 0, wxALL, 4);
+    m_toolbar->Add(make_tool_group("Tools",
+        { m_line_tool_btn, m_arc_tool_btn, m_curve_tool_btn, m_splice_btn }), 0, wxALL, 4);
+    m_toolbar->Add(make_tool_group("Geometry", {
+        m_snap_toggle,
+        new wxStaticText(this, wxID_ANY, "Grid:"), m_grid_res_choice,
+        new wxStaticText(this, wxID_ANY, "Arc:"),  m_arc_res_choice,
+        m_native_arc_chk, m_fill_toggle,
+        new wxStaticText(this, wxID_ANY, "Len:"),  m_length_input,
+        m_snip_btn }), 0, wxALL, 4);
+
+    // Quality group is assembled manually so it can host the initial-layer rows
+    // (sub-sizers) alongside the wipe/coast controls.
+    auto* quality_box = new wxStaticBoxSizer(wxHORIZONTAL, this, "Quality");
+    quality_box->Add(new wxStaticText(this, wxID_ANY, "Init:"), 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    quality_box->Add(m_initial_layer_count_spin, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    for (int i = 0; i < kMaxInitialLayers; ++i)
+        quality_box->Add(m_initial_layer_rows[i], 0, wxALIGN_CENTER_VERTICAL, 0);
+    quality_box->Add(m_wipe_check, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    quality_box->Add(new wxStaticText(this, wxID_ANY, "Dist:"), 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    quality_box->Add(m_wipe_dist_spin, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    quality_box->Add(new wxStaticText(this, wxID_ANY, "Coast:"), 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    quality_box->Add(m_coast_spin, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    m_toolbar->Add(quality_box, 0, wxALL, 4);
+
+    m_toolbar->Add(make_tool_group("View", { m_measure_toggle, m_coord_toggle }), 0, wxALL, 4);
+    m_toolbar->Add(make_tool_group("Layers", {
+        m_add_layer_btn, m_insert_below_btn, m_delete_layer_btn, m_remove_layer_btn,
+        m_copy_layer_btn, m_paste_layer_btn, m_copy_prev_btn, m_mirror_stack_btn,
+        m_clear_btn }), 0, wxALL, 4);
+    m_toolbar->Add(make_tool_group("Session", { m_simulate_btn, m_finalize_btn }), 0, wxALL, 4);
+
+    // Vertical layer slider on the right of the canvas (matches Preview placement).
+    m_layer_slider = new DrawLayerSlider(this, [this](int idx) { on_slider_layer_change(idx); });
+
+    auto* content_sizer = new wxBoxSizer(wxHORIZONTAL);
+    content_sizer->Add(m_canvas,       1, wxEXPAND | wxALL, 8);
+    content_sizer->Add(m_layer_slider, 0, wxEXPAND | wxALL, 4);
 
     auto* main_sizer = new wxBoxSizer(wxVERTICAL);
-    main_sizer->Add(top_sizer, 0, wxEXPAND);
-    main_sizer->Add(nav_sizer, 0, wxEXPAND);
-    main_sizer->Add(m_canvas, 1, wxEXPAND | wxALL, 8);
+    main_sizer->Add(m_banner_text, 0, wxEXPAND | wxALL, 4); // full-width banner line
+    main_sizer->Add(m_toolbar,     0, wxEXPAND);            // responsive grouped toolbar
+    main_sizer->Add(content_sizer, 1, wxEXPAND);            // canvas + slider
 
     SetSizer(main_sizer);
+
+    // Default to N=1 initial layer: show only the first row.
+    update_initial_layer_rows_visibility(1);
 
     // Bind events
     m_draw_toggle->Bind(wxEVT_TOGGLEBUTTON, &DrawModePanel::on_draw_toggle, this);
@@ -267,7 +318,11 @@ DrawModePanel::DrawModePanel(wxWindow* parent, Plater* plater)
     m_grid_res_choice->Bind(wxEVT_CHOICE, &DrawModePanel::on_grid_res_change, this);
     m_arc_res_choice->Bind(wxEVT_CHOICE,  &DrawModePanel::on_arc_res_change,  this);
     m_native_arc_chk->Bind(wxEVT_CHECKBOX, &DrawModePanel::on_native_arc_toggle, this);
-    m_first_layer_flow_spin->Bind(wxEVT_SPINCTRL, &DrawModePanel::on_first_layer_flow_change, this);
+    m_initial_layer_count_spin->Bind(wxEVT_SPINCTRL, &DrawModePanel::on_initial_layer_count_change, this);
+    for (int i = 0; i < kMaxInitialLayers; ++i) {
+        m_initial_flow_spin[i]->Bind(wxEVT_SPINCTRL, &DrawModePanel::on_initial_layer_param_change, this);
+        m_initial_height_spin[i]->Bind(wxEVT_SPINCTRLDOUBLE, &DrawModePanel::on_initial_layer_param_change, this);
+    }
     m_wipe_check->Bind(wxEVT_CHECKBOX, &DrawModePanel::on_wipe_toggle, this);
     m_wipe_dist_spin->Bind(wxEVT_SPINCTRLDOUBLE, &DrawModePanel::on_wipe_dist_change, this);
     m_coast_spin->Bind(wxEVT_SPINCTRLDOUBLE, &DrawModePanel::on_coast_change, this);
@@ -375,9 +430,18 @@ void DrawModePanel::activate(PartPlate* plate)
     if (m_arc_res_choice) m_arc_res_choice->SetSelection(3);
     if (m_native_arc_chk) m_native_arc_chk->SetValue(false);
 
-    // Reset first-layer flow (elephant's-foot compensation) to default 90%.
-    m_session.first_layer_flow_ratio = 0.90;
-    if (m_first_layer_flow_spin) m_first_layer_flow_spin->SetValue(90);
+    // Reset initial layers to default: N=1, layer-0 flow 0.90, no height overrides.
+    m_session.initial_layer_flow_ratios = { 0.90 };
+    m_session.initial_layer_heights     = {};
+    {
+        const double default_h = profile_layer_height();
+        if (m_initial_layer_count_spin) m_initial_layer_count_spin->SetValue(1);
+        for (int i = 0; i < kMaxInitialLayers; ++i) {
+            if (m_initial_flow_spin[i])   m_initial_flow_spin[i]->SetValue(i == 0 ? 90 : 100);
+            if (m_initial_height_spin[i]) m_initial_height_spin[i]->SetValue(default_h);
+        }
+        update_initial_layer_rows_visibility(1);
+    }
 
     // Reset anti-blob wipe + coasting to defaults (wipe on / 1.0 mm, coast off).
     m_session.wipe_enabled      = true;
@@ -469,11 +533,25 @@ void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
     }
     if (m_native_arc_chk) m_native_arc_chk->SetValue(m_session.native_arc_output);
 
-    // Sync the first-layer flow spin to the loaded session's setting.
-    if (m_first_layer_flow_spin) {
-        int pct = static_cast<int>(std::lround(m_session.first_layer_flow_ratio * 100.0));
-        pct = std::clamp(pct, 50, 100);
-        m_first_layer_flow_spin->SetValue(pct);
+    // Sync the initial-layers group to the loaded session.
+    {
+        const double default_h = profile_layer_height();
+        const auto&  ratios    = m_session.initial_layer_flow_ratios;
+        const auto&  heights   = m_session.initial_layer_heights;
+        int n = std::max((int)ratios.size(), (int)heights.size());
+        n = std::clamp(n, 1, kMaxInitialLayers);
+        if (m_initial_layer_count_spin) m_initial_layer_count_spin->SetValue(n);
+        for (int i = 0; i < kMaxInitialLayers; ++i) {
+            int pct = (i < (int)ratios.size())
+                          ? std::clamp((int)std::lround(ratios[i] * 100.0), 10, 150)
+                          : 100;
+            double h = (i < (int)heights.size() && heights[i] > 0.0)
+                           ? std::clamp(heights[i], 0.04, 1.0)
+                           : default_h;
+            if (m_initial_flow_spin[i])   m_initial_flow_spin[i]->SetValue(pct);
+            if (m_initial_height_spin[i]) m_initial_height_spin[i]->SetValue(h);
+        }
+        update_initial_layer_rows_visibility(n);
     }
 
     // Sync the wipe / coast widgets to the loaded session's settings.
@@ -576,6 +654,44 @@ void DrawModePanel::update_layer_label()
     // "Insert Below" inserts a new empty layer at the current position, pushing
     // the current layer (and everything above) up. Requires a valid active layer.
     if (m_insert_below_btn)  m_insert_below_btn->Enable(active_valid);
+
+    // Keep the layer slider in sync after every layer mutation. update_layer_label()
+    // is invoked after add/insert/delete/clear/copy/paste/mirror/undo/redo, so a single
+    // call here covers all those paths.
+    refresh_layer_slider();
+}
+
+wxSizer* DrawModePanel::make_tool_group(const wxString& title, std::vector<wxWindow*> items)
+{
+    // wxStaticBoxSizer draws a titled border so each group reads as a discrete cluster.
+    // wxWrapSizer treats the whole group as one indivisible, wrappable element.
+    auto* box = new wxStaticBoxSizer(wxHORIZONTAL, this, title);
+    for (wxWindow* item : items) {
+        if (item)
+            box->Add(item, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    }
+    return box;
+}
+
+void DrawModePanel::refresh_layer_slider()
+{
+    if (!m_layer_slider) return;
+    std::vector<double> zs;
+    zs.reserve(m_session.layers.size());
+    for (const auto& l : m_session.layers) zs.push_back(l.z_end);
+    m_layer_slider->set_layers(zs);
+    m_layer_slider->set_active(m_session.active_layer);
+}
+
+void DrawModePanel::on_slider_layer_change(int new_index)
+{
+    if (new_index < 0 || new_index >= m_session.layer_count()) return;
+    if (new_index == m_session.active_layer) return;
+    m_session.active_layer = new_index;
+    sync_chain_anchor();    // keep continuation preview correct
+    reset_draft(false);     // cancel any in-progress draft on layer change
+    update_layer_label();   // updates button enable-state + refreshes the slider
+    if (m_canvas) m_canvas->Refresh();
 }
 
 void DrawModePanel::dispatch_command(std::unique_ptr<DrawCommand> cmd)
@@ -2148,9 +2264,61 @@ void DrawModePanel::on_native_arc_toggle(wxCommandEvent&)
     m_session.native_arc_output = m_native_arc_chk->GetValue();
 }
 
-void DrawModePanel::on_first_layer_flow_change(wxCommandEvent&)
+void DrawModePanel::on_initial_layer_count_change(wxCommandEvent&)
 {
-    m_session.first_layer_flow_ratio = m_first_layer_flow_spin->GetValue() / 100.0;
+    const int n = m_initial_layer_count_spin ? m_initial_layer_count_spin->GetValue() : 1;
+    update_initial_layer_rows_visibility(n);
+    Layout();
+    rebuild_initial_layers_from_ui();
+}
+
+void DrawModePanel::on_initial_layer_param_change(wxCommandEvent&)
+{
+    rebuild_initial_layers_from_ui();
+}
+
+void DrawModePanel::rebuild_initial_layers_from_ui()
+{
+    const int n = std::clamp(
+        m_initial_layer_count_spin ? m_initial_layer_count_spin->GetValue() : 1,
+        0, kMaxInitialLayers);
+
+    std::vector<double> ratios;
+    std::vector<double> heights;
+    ratios.reserve(n);
+    heights.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        const int    pct = m_initial_flow_spin[i]   ? m_initial_flow_spin[i]->GetValue()    : 100;
+        const double h   = m_initial_height_spin[i] ? m_initial_height_spin[i]->GetValue()  : profile_layer_height();
+        ratios.push_back(pct / 100.0);
+        heights.push_back(h);
+    }
+    m_session.initial_layer_flow_ratios = std::move(ratios);
+    m_session.initial_layer_heights     = std::move(heights);
+
+    // Bake the height overrides into the layer Z values and refresh the preview.
+    m_session.reflow_layer_z();
+    refresh_layer_slider(); // re-push updated z-heights so the slider labels aren't stale (D1)
+    if (m_canvas) m_canvas->Refresh(false);
+}
+
+void DrawModePanel::update_initial_layer_rows_visibility(int n)
+{
+    n = std::clamp(n, 0, kMaxInitialLayers);
+    for (int i = 0; i < kMaxInitialLayers; ++i) {
+        if (m_initial_layer_rows[i])
+            m_initial_layer_rows[i]->ShowItems(i < n);
+    }
+}
+
+double DrawModePanel::profile_layer_height() const
+{
+    double lh = 0.2;
+    if (wxGetApp().preset_bundle) {
+        const double v = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
+        if (v > 0.0) lh = v;
+    }
+    return lh;
 }
 
 void DrawModePanel::on_wipe_toggle(wxCommandEvent&)
