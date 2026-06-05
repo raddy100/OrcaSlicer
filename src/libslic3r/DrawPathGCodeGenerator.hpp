@@ -129,11 +129,12 @@ private:
                                              unsigned int       extruder_id,
                                              const DynamicConfig* config_override = nullptr) const;
 
-    // Extrusion volume per mm of travel for a straight segment.
-    // Formula: (nozzle_diameter * layer_height) / (pi * (filament_diameter/2)^2)
-    //          * extrusion_multiplier * segment_length_mm
+    // Extrusion volume per mm of travel for a straight segment at the current
+    // layer height. Formula:
+    //   (nozzle_diameter * layer_height_mm) / (pi * (filament_diameter/2)^2)
+    //   * extrusion_multiplier * segment_length_mm
     // PRD-MAP: "extrusion_multiplier" → uses print_flow_ratio from process config.
-    double calc_extrusion(double segment_length_mm) const;
+    double calc_extrusion(double segment_length_mm, double layer_height_mm) const;
 
     // Returns fan speed as 0-100 percent for the given layer index.
     // Matches CoolingBuffer ramp: off for first close_fan_the_first_x_layers,

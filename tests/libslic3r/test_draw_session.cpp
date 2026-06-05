@@ -421,6 +421,8 @@ TEST_CASE("Draw3mf: round-trip preserves per-initial-layer flow ratios and heigh
     REQUIRE(dst.initial_layer_heights.size() == 2);
     REQUIRE_THAT(dst.initial_layer_heights[0], WithinAbs(0.30, 1e-9));
     REQUIRE_THAT(dst.initial_layer_heights[1], WithinAbs(0.15, 1e-9));
+    REQUIRE(dst.base_layer_heights.size() == 1);
+    REQUIRE_THAT(dst.base_layer_heights[0], WithinAbs(0.20, 1e-9));
 }
 
 TEST_CASE("Draw3mf: default session round-trips to {0.90} with empty heights", "[Draw3mf][InitialLayers]")
@@ -438,6 +440,36 @@ TEST_CASE("Draw3mf: default session round-trips to {0.90} with empty heights", "
     REQUIRE(dst.initial_layer_flow_ratios.size() == 1);
     REQUIRE_THAT(dst.initial_layer_flow_ratios[0], WithinAbs(0.90, 1e-9));
     REQUIRE(dst.initial_layer_heights.empty());
+    REQUIRE(dst.base_layer_heights.size() == 1);
+    REQUIRE_THAT(dst.base_layer_heights[0], WithinAbs(0.20, 1e-9));
+}
+
+TEST_CASE("Draw3mf: round-trip preserves base layer heights for later reflow", "[Draw3mf][InitialLayers]")
+{
+    namespace fs = boost::filesystem;
+    DrawSession src;
+    src.add_layer(0.2);
+    src.add_layer(0.25);
+    src.add_layer(0.2);
+    src.layers[0].segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
+    src.initial_layer_heights = { 0.15, 0.18 };
+    src.reflow_layer_z();
+
+    DrawSession dst;
+    const fs::path tmp = fs::temp_directory_path() / "orca_test_initial_layers_base_heights.3mf";
+    REQUIRE(roundtrip_draw_session(src, dst, tmp));
+    fs::remove(tmp);
+
+    REQUIRE(dst.base_layer_heights.size() == 3);
+    REQUIRE_THAT(dst.base_layer_heights[0], WithinAbs(0.20, 1e-9));
+    REQUIRE_THAT(dst.base_layer_heights[1], WithinAbs(0.25, 1e-9));
+    REQUIRE_THAT(dst.base_layer_heights[2], WithinAbs(0.20, 1e-9));
+
+    dst.initial_layer_heights.clear();
+    dst.reflow_layer_z();
+    REQUIRE_THAT(dst.layers[0].layer_height(), WithinAbs(0.20, 1e-9));
+    REQUIRE_THAT(dst.layers[1].layer_height(), WithinAbs(0.25, 1e-9));
+    REQUIRE_THAT(dst.layers[2].layer_height(), WithinAbs(0.20, 1e-9));
 }
 
 // Remove every occurrence of an XML attribute (name="...") from a string, including
@@ -506,6 +538,7 @@ TEST_CASE("Draw3mf: legacy file with only first_layer_flow_ratio migrates to {le
             if (std::string(st.m_filename).find("draw_session_obj_") != std::string::npos) {
                 strip_xml_attr(data, "initial_layer_flow_ratios");
                 strip_xml_attr(data, "initial_layer_heights");
+                strip_xml_attr(data, "base_layer_heights");
                 // Sanity: the legacy attribute must survive.
                 REQUIRE(data.find("first_layer_flow_ratio=\"") != std::string::npos);
                 REQUIRE(data.find("initial_layer_flow_ratios=\"") == std::string::npos);
@@ -539,6 +572,8 @@ TEST_CASE("Draw3mf: legacy file with only first_layer_flow_ratio migrates to {le
     REQUIRE(dst.initial_layer_flow_ratios.size() == 1);
     REQUIRE_THAT(dst.initial_layer_flow_ratios[0], WithinAbs(0.8, 1e-9));
     REQUIRE(dst.initial_layer_heights.empty());
+    REQUIRE(dst.base_layer_heights.size() == 1);
+    REQUIRE_THAT(dst.base_layer_heights[0], WithinAbs(0.20, 1e-9));
 }
 
 // ---------------------------------------------------------------------------

@@ -1953,6 +1953,29 @@ TEST_CASE("InitialLayers: reflow_layer_z applies height overrides cumulatively",
     REQUIRE_THAT(s.layers[2].z_end, Catch::Matchers::WithinAbs(0.5, 1e-9));
 }
 
+TEST_CASE("InitialLayers: reflow_layer_z restores non-overridden layers to their base heights", "[InitialLayers]")
+{
+    DrawSession s = make_n_layer_line_session(3, 0.2);
+    s.initial_layer_heights = { 0.15, 0.15 };
+    s.reflow_layer_z();
+
+    REQUIRE_THAT(s.layers[0].layer_height(), Catch::Matchers::WithinAbs(0.15, 1e-9));
+    REQUIRE_THAT(s.layers[1].layer_height(), Catch::Matchers::WithinAbs(0.15, 1e-9));
+    REQUIRE_THAT(s.layers[2].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+
+    s.initial_layer_heights = { 0.15 };
+    s.reflow_layer_z();
+    REQUIRE_THAT(s.layers[0].layer_height(), Catch::Matchers::WithinAbs(0.15, 1e-9));
+    REQUIRE_THAT(s.layers[1].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+    REQUIRE_THAT(s.layers[2].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+
+    s.initial_layer_heights.clear();
+    s.reflow_layer_z();
+    REQUIRE_THAT(s.layers[0].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+    REQUIRE_THAT(s.layers[1].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+    REQUIRE_THAT(s.layers[2].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+}
+
 TEST_CASE("InitialLayers: generated G-code Z reflects per-layer height overrides", "[InitialLayers]")
 {
     DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
@@ -1975,6 +1998,30 @@ TEST_CASE("InitialLayers: generated G-code Z reflects per-layer height overrides
     REQUIRE_THAT(z2, Catch::Matchers::WithinAbs(0.7, 1e-6));
     // The override raised the layer-0 height above its natural 0.2 mm.
     REQUIRE(z1 - z0 > 0.0);
+}
+
+TEST_CASE("InitialLayers: generator uses each layer's reflowed height for extrusion", "[InitialLayers]")
+{
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.30, 1.75, 1.0);
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+    cfg.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
+
+    DrawSession session = make_n_layer_line_session(4, 0.2);
+    session.initial_layer_flow_ratios = { 0.90, 0.90 };
+    session.initial_layer_heights     = { 0.15, 0.15 };
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    const double filament_area = M_PI * (1.75 / 2.0) * (1.75 / 2.0);
+    const auto expected_e = [filament_area](double layer_height, double flow_mult) {
+        return (0.4 * layer_height) / filament_area * 10.0 * flow_mult;
+    };
+
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 0), Catch::Matchers::WithinRel(expected_e(0.15, 0.90), 1e-3));
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 1), Catch::Matchers::WithinRel(expected_e(0.15, 0.90), 1e-3));
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 2), Catch::Matchers::WithinRel(expected_e(0.20, 1.00), 1e-3));
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 3), Catch::Matchers::WithinRel(expected_e(0.20, 1.00), 1e-3));
 }
 
 // Edge cases: N=0 (empty ratios) means every layer extrudes at full flow; an empty

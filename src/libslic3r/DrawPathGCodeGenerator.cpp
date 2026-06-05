@@ -483,6 +483,7 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
 
     // All segments in a layer print at the same Z height (z_end).
     const double layer_z = layer.z_end;
+    const double layer_h = std::max(layer.layer_height(), 0.05);
 
     // Read arc output mode once per layer.
     const bool native_arc_mode = m_native_arc;
@@ -535,13 +536,13 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
                     const Vec2d  dir       = (seg.end - seg.start).normalized();
                     const double extr_len  = seg_len - m_coast_distance_mm;
                     const Vec2d  coast_from = seg.start + dir * extr_len + abs_offset;
-                    const double dE = calc_extrusion(extr_len);
+                    const double dE = calc_extrusion(extr_len, layer_h);
                     out += m_writer.extrude_to_xyz(
                         Vec3d(coast_from.x(), coast_from.y(), layer_z), dE, "draw extrude");
                     out += m_writer.travel_to_xy(abs_end, "coast");
                 } else {
                     // Standard G1 extrusion.
-                    const double dE = calc_extrusion(seg_len);
+                    const double dE = calc_extrusion(seg_len, layer_h);
                     out += m_writer.extrude_to_xyz(
                         Vec3d(abs_end.x(), abs_end.y(), layer_z), dE, "draw extrude");
                 }
@@ -561,7 +562,7 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
 
                 if (std::abs(D) < 1e-10) {
                     // Collinear fallback: single G1.
-                    const double dE = calc_extrusion(seg.length());
+                    const double dE = calc_extrusion(seg.length(), layer_h);
                     out += m_writer.extrude_to_xyz(
                         Vec3d(abs_end.x(), abs_end.y(), layer_z), dE, "draw arc fallback");
                 } else {
@@ -584,7 +585,7 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
 
                     // Use sampled length for accurate extrusion volume.
                     const double arc_length = draw_segment_sampled_length(seg, m_curve_tol);
-                    const double dE = calc_extrusion(arc_length);
+                    const double dE = calc_extrusion(arc_length, layer_h);
 
                     out += m_writer.extrude_arc_to_xy(
                         abs_end, center_offset, dE, is_ccw, "draw arc G2/G3");
@@ -605,14 +606,14 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
                         if (budget >= chord - 1e-9) {
                             const Vec2d abs_pt = pts[i] + abs_offset;
                             out += m_writer.extrude_to_xyz(
-                                Vec3d(abs_pt.x(), abs_pt.y(), layer_z), calc_extrusion(chord), "draw extrude");
+                                Vec3d(abs_pt.x(), abs_pt.y(), layer_z), calc_extrusion(chord, layer_h), "draw extrude");
                             budget -= chord;
                         } else if (budget > 1e-9) {
                             // Split this chord: extrude the head portion, travel the tail.
                             const Vec2d dir = (pts[i] - pts[i - 1]).normalized();
                             const Vec2d split = pts[i - 1] + dir * budget + abs_offset;
                             out += m_writer.extrude_to_xyz(
-                                Vec3d(split.x(), split.y(), layer_z), calc_extrusion(budget), "draw extrude");
+                                Vec3d(split.x(), split.y(), layer_z), calc_extrusion(budget, layer_h), "draw extrude");
                             const Vec2d abs_pt = pts[i] + abs_offset;
                             out += m_writer.travel_to_xy(abs_pt, "coast");
                             budget = 0.0;
@@ -625,7 +626,7 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
                     for (size_t i = 1; i < pts.size(); ++i) {
                         const Vec2d abs_pt  = pts[i]     + abs_offset;
                         const double chord = (pts[i] - pts[i - 1]).norm();
-                        const double dE    = calc_extrusion(chord);
+                        const double dE    = calc_extrusion(chord, layer_h);
                         out += m_writer.extrude_to_xyz(
                             Vec3d(abs_pt.x(), abs_pt.y(), layer_z), dE, "draw extrude");
                     }
@@ -866,14 +867,13 @@ std::string DrawPathGCodeGenerator::process_config_gcode_strings(const std::stri
 // Private: extrusion calculation
 // ---------------------------------------------------------------------------
 
-double DrawPathGCodeGenerator::calc_extrusion(double segment_length_mm) const
+double DrawPathGCodeGenerator::calc_extrusion(double segment_length_mm, double layer_height_mm) const
 {
     if (segment_length_mm <= 0.0)
         return 0.0;
 
-    // PRD-MAP: "layer_height" → layer_height from PrintObjectConfig.
     const double nozzle_d    = std::max(cfg_float_vec("nozzle_diameter"), 0.1);
-    const double layer_h     = std::max(cfg_float("layer_height"),        0.05);
+    const double layer_h     = std::max(layer_height_mm,                  0.05);
     const double filament_d  = std::max(cfg_float_vec("filament_diameter"), 0.1);
     // PRD-MAP: "extrusion_multiplier" → print_flow_ratio (defaults to 1.0).
     const double flow_ratio  = std::max(cfg_float("print_flow_ratio"), 0.01);

@@ -87,6 +87,10 @@ struct DrawLayer {
 struct DrawSession {
     std::vector<DrawLayer> layers;       // in Z order
     int                    active_layer; // index into layers[], -1 if none
+    // Stable per-layer heights captured before any initial-layer reflow. This lets
+    // initial_layer_heights be edited repeatedly without permanently baking prior
+    // overrides into unaffected layers.
+    std::vector<double>    base_layer_heights;
 
     // Max chord-to-curve deviation (mm) when sampling arc/bezier segments into
     // G1 polylines for G-code output, mesh generation, and canvas rendering.
@@ -144,9 +148,14 @@ struct DrawSession {
     // Does NOT clamp; clamping (to a safe extrusion range) happens in the generator.
     double flow_ratio_for_layer(int layer_index) const;
 
+    // Backfills / resizes base_layer_heights to match layers using each layer's
+    // current z span as the fallback source. Needed for legacy sessions loaded
+    // without the new serialized base heights attribute.
+    void   sync_base_layer_heights();
+
     // Recompute z_start/z_end of ALL layers cumulatively. For layer i, use
-    // initial_layer_heights[i] when present and > 0, otherwise keep that layer's current
-    // natural height (z_end - z_start). Stacks each layer on the previous layer's z_end.
+    // initial_layer_heights[i] when present and > 0, otherwise use the stable
+    // base_layer_heights[i]. Stacks each layer on the previous layer's z_end.
     void   reflow_layer_z();
 
     // 3-D bounding box across all layers — used to create the synthetic mesh.
