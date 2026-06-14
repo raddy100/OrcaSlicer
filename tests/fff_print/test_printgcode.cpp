@@ -124,14 +124,14 @@ SCENARIO( "PrintGCode basic functionality", "[PrintGCode][.]") {
             THEN("Between-object-gcode is emitted.") {
                 REQUIRE(gcode.find("; between-object-gcode") != std::string::npos);
             }
-            THEN("final Z height is 20.1mm") {
+            THEN("final Z height includes 10mm transition lift") {
                 double final_z = 0.0;
                 GCodeReader reader;
                 reader.apply_config(print.config());
                 reader.parse_buffer(gcode, [&final_z] (GCodeReader& self, const GCodeReader::GCodeLine& line) {
                     final_z = std::max(final_z, static_cast<double>(self.z())); // record the highest Z point we reach
                 });
-                REQUIRE(final_z == Catch::Approx(20.1));
+                REQUIRE_THAT(final_z, Catch::Matchers::WithinAbs(30.1, 0.001));
             }
             THEN("Z height resets on object change") {
                 double final_z = 0.0;

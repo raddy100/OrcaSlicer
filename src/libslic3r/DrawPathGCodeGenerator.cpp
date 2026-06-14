@@ -26,6 +26,9 @@ std::string gcode_processor_role_tag(ExtrusionRole role)
     return ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) + ExtrusionEntity::role_to_string(role) + "\n";
 }
 
+constexpr double k_transition_lift_mm = 10.0;
+constexpr double k_transition_lift_speed_mm_s = 10.0;
+
 } // namespace
 
 DrawPathGCodeGenerator::DrawPathGCodeGenerator(const DynamicPrintConfig& full_config,
@@ -78,6 +81,7 @@ std::string DrawPathGCodeGenerator::generate(const DrawSession& session_in,
     m_wipe_distance_mm  = std::max(0.0, session.wipe_distance_mm);
     m_coast_distance_mm = std::max(0.0, session.coast_distance_mm);
     m_pending_wipe.reset();
+    m_force_unretract_on_next_extrusion = false;
 
     std::string gcode;
     gcode.reserve(1024 * 64);
@@ -121,24 +125,70 @@ std::string DrawPathGCodeGenerator::generate_batch(const std::vector<BatchItem>&
 
     gcode += generate_preamble(first_reflowed);
 
+    bool generated_any_object = false;
+    m_pending_wipe.reset();
+    m_force_unretract_on_next_extrusion = false;
     for (const auto& [sess, inst_offset] : items) {
         if (!sess || sess->is_empty()) continue;
         // Work on a reflowed copy so height overrides bake into Z without mutating
         // the caller's const session.
         DrawSession reflowed = *sess;
         reflowed.reflow_layer_z();
-        // Update per-session settings for this batch item's layers.
+        const Vec2d abs_offset = m_plate_origin + inst_offset;
+
+        if (generated_any_object) {
+            const DrawLayer*   first_layer = nullptr;
+            const DrawSegment* first_segment = nullptr;
+            for (const DrawLayer& layer : reflowed.layers) {
+                if (!layer.segments.empty()) {
+                    first_layer = &layer;
+                    first_segment = &layer.segments.front();
+                    break;
+                }
+            }
+
+            if (first_layer != nullptr && first_segment != nullptr) {
+                const Vec2d abs_start = first_segment->start + abs_offset;
+                const double layer_z = first_layer->z_end;
+                const Vec3d& cur = m_writer.get_position();
+                const bool need_xy =
+                    std::abs(cur.x() - abs_start.x()) > 0.001 ||
+                    std::abs(cur.y() - abs_start.y()) > 0.001;
+                const bool need_z =
+                    std::abs(cur.z() - layer_z) > 0.001;
+
+                if (need_xy || need_z) {
+                    // For inter-object moves, retract first to reduce ooze before
+                    // the boundary wipe/travel to the next object's start.
+                    gcode += retract_with_optional_wipe(/*force_full_retract_before_wipe=*/true);
+                    if (need_xy) {
+                        const double lift_base_z = std::max(cur.z(), layer_z);
+                        gcode += m_writer.travel_to_z_with_speed(
+                            lift_base_z + k_transition_lift_mm,
+                            k_transition_lift_speed_mm_s,
+                            "transition lift",
+                            true);
+                        gcode += m_writer.travel_to_xy(abs_start, "to seg start");
+                    }
+                    gcode += m_writer.travel_to_z(layer_z, "restore layer Z", true);
+                    m_force_unretract_on_next_extrusion = true;
+                }
+            }
+        }
+
+        // Update per-session settings for this batch item's layers after any
+        // inter-object transition so boundary wipe uses the previous object state.
         m_curve_tol  = reflowed.curve_tolerance_mm;
         m_native_arc = reflowed.native_arc_output;
         m_initial_layer_flow_ratios = reflowed.initial_layer_flow_ratios;
         m_wipe_enabled      = reflowed.wipe_enabled;
         m_wipe_distance_mm  = std::max(0.0, reflowed.wipe_distance_mm);
         m_coast_distance_mm = std::max(0.0, reflowed.coast_distance_mm);
-        m_pending_wipe.reset();
-        const Vec2d abs_offset = m_plate_origin + inst_offset;
+
         for (const DrawLayer& layer : reflowed.layers) {
             gcode += generate_layer(layer, abs_offset);
         }
+        generated_any_object = true;
     }
 
     gcode += generate_postamble(first_reflowed);
@@ -405,7 +455,7 @@ DrawPathGCodeGenerator::compute_wipe_geometry(const DrawSegment& seg, const Vec2
     return WipeGeometry{ end_pt, dir, distance };
 }
 
-std::string DrawPathGCodeGenerator::retract_with_optional_wipe()
+std::string DrawPathGCodeGenerator::retract_with_optional_wipe(const bool force_full_retract_before_wipe)
 {
     // No pending extrusion or wipe disabled => behave exactly like before.
     if (!m_wipe_enabled || !m_pending_wipe.has_value())
@@ -427,15 +477,23 @@ std::string DrawPathGCodeGenerator::retract_with_optional_wipe()
         return m_writer.retract();
 
     std::string out;
-    // Partial retract done before the wipe (retract_before_wipe fraction). With
-    // the default 100% this is the full retraction; with 0% nothing is emitted
-    // here and all retraction happens after the wipe.
-    out += m_writer.retract(/*before_wipe=*/true);
+    // Object transitions can force a full retract before the wipe to reduce
+    // stringing when moving to the next object's first layer.
+    if (force_full_retract_before_wipe) {
+        out += m_writer.retract();
+    } else {
+        // Partial retract done before the wipe (retract_before_wipe fraction).
+        // With the default 100% this is the full retraction; with 0% nothing is
+        // emitted here and all retraction happens after the wipe.
+        out += m_writer.retract(/*before_wipe=*/true);
+    }
     // Wipe travel move backward along the segment — no extrusion. Use travel_to_xy
     // so the "wipe" comment is preserved (travel_to_xyz drops it on same-Z moves).
     out += m_writer.travel_to_xy(wipe->end_pt, "wipe");
-    // Remaining retraction so the net retracted length matches a plain retract().
-    out += m_writer.retract();
+    // In default mode, finish any remaining retract so net retraction matches a
+    // plain retract(). In forced mode we already retracted fully above.
+    if (!force_full_retract_before_wipe)
+        out += m_writer.retract();
     return out;
 }
 
@@ -500,8 +558,9 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
             std::abs(cur.z() - layer_z)       > 0.001;
 
         if (seg.is_travel) {
-            // Travel segment: retract (optionally wiping first), visit sampled waypoints, unretract.
-            out += retract_with_optional_wipe();
+            // Travel segment: plain retract / travel / unretract. Wipe is reserved for
+            // inter-object transitions handled by generate_batch().
+            out += m_writer.retract();
             if (need_reposition)
                 out += m_writer.travel_to_xyz(Vec3d(abs_start.x(), abs_start.y(), layer_z), "to travel-src");
 
@@ -520,10 +579,15 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
 
         } else {
             // Extrusion segment: position head at abs_start if needed, then extrude.
+            if (m_force_unretract_on_next_extrusion && !need_reposition) {
+                out += m_writer.unretract();
+                m_force_unretract_on_next_extrusion = false;
+            }
             if (need_reposition) {
-                out += retract_with_optional_wipe();
+                out += m_writer.retract();
                 out += m_writer.travel_to_xyz(Vec3d(abs_start.x(), abs_start.y(), layer_z), "to seg start");
                 out += m_writer.unretract();
+                m_force_unretract_on_next_extrusion = false;
             }
 
             const bool coast_on = (m_coast_distance_mm > 1e-9);
@@ -633,7 +697,7 @@ std::string DrawPathGCodeGenerator::generate_layer(const DrawLayer& layer,
                 }
             }
 
-            // Remember this extrusion so the next retract can wipe backward along it.
+            // Remember this extrusion so the next object-boundary retract can wipe backward along it.
             m_pending_wipe = PendingWipe{ seg, abs_offset, Vec3d(abs_end.x(), abs_end.y(), layer_z) };
         }
     }
@@ -676,8 +740,8 @@ std::string DrawPathGCodeGenerator::generate_postamble(const DrawSession& sessio
 {
     std::string out;
 
-    // Wipe backward along the final extrusion (if any) before the closing retract
-    // so the print does not end in a blob, then retract and lift as before.
+    // Final object completion: allow one last anti-blob wipe before the closing
+    // retract if a pending extrusion exists and wipe is enabled.
     out += retract_with_optional_wipe();
 
     // Lift nozzle 10 mm above current position.

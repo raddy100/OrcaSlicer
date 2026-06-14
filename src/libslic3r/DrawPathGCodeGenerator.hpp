@@ -76,6 +76,7 @@ private:
     bool   m_wipe_enabled     { true };
     double m_wipe_distance_mm { 1.0 };
     double m_coast_distance_mm{ 0.0 };
+    bool   m_force_unretract_on_next_extrusion { false };
 
 public:
     // Geometry of a wipe move computed from the last extruded segment.
@@ -109,10 +110,12 @@ private:
     std::optional<PendingWipe> m_pending_wipe;
 
     // Emit a retract, optionally preceded by an anti-blob wipe of the pending
-    // extrusion. Order (matching OrcaSlicer): partial retract (retract_before_wipe
-    // fraction) -> wipe travel move (no extrusion) -> remaining retract. The net
-    // retraction length is identical to a plain retract(); only its split moves.
-    std::string retract_with_optional_wipe();
+    // extrusion. Default order (matching OrcaSlicer): partial retract
+    // (retract_before_wipe fraction) -> wipe travel move (no extrusion) ->
+    // remaining retract. The net retraction length is identical to a plain
+    // retract(); only its split moves. For object transitions,
+    // force_full_retract_before_wipe=true retracts fully before the wipe.
+    std::string retract_with_optional_wipe(bool force_full_retract_before_wipe = false);
     std::string generate_preamble(const DrawSession& session);
     std::string generate_layer(const DrawLayer& layer, const Vec2d& abs_offset);
     std::string generate_postamble(const DrawSession& session);
