@@ -552,6 +552,10 @@ void DrawModePanel::load_for_edit(ModelObject* obj, int obj_idx)
             if (m_initial_height_spin[i]) m_initial_height_spin[i]->SetValue(h);
         }
         update_initial_layer_rows_visibility(n);
+        // Show/hide rows updates sizer item visibility only; force a relayout so
+        // the loaded row count (e.g. L1) is visible immediately on first open.
+        if (m_toolbar) m_toolbar->Layout();
+        Layout();
     }
 
     // Sync the wipe / coast widgets to the loaded session's settings.

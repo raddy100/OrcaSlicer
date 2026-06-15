@@ -93,6 +93,8 @@ static const float g_min_purge_volume = 100.f;
 static const float g_purge_volume_one_time = 135.f;
 static const int g_max_flush_count = 4;
 static const size_t g_max_label_object = 64;
+static const double g_sequential_object_travel_lift = 10.0;
+static const double g_sequential_object_travel_lift_speed = 10.0;
 
 Vec2d travel_point_1;
 Vec2d travel_point_2;
@@ -3240,7 +3242,17 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                     } else {
                         file.write(this->retract());
                     }
-                    file.write(m_writer.travel_to_z(m_max_layer_z + m_writer.config.z_hop.get_at(initial_extruder_id)));
+                    const double current_z = m_writer.get_position().z();
+                    const double planner_safe_z = m_max_layer_z + m_writer.config.z_hop.get_at(initial_extruder_id);
+                    const double transition_lift_z = std::max(current_z + g_sequential_object_travel_lift, planner_safe_z);
+                    const double transition_travel_z = std::min(transition_lift_z, print.config().printable_height.value);
+                    // Emit an explicit standalone Z move like end-of-job standby G-code so the
+                    // lift is always materialized and uses a visible, conservative Z feedrate.
+                    file.write(m_writer.travel_to_z_with_speed(
+                        transition_travel_z,
+                        g_sequential_object_travel_lift_speed,
+                        "Lift 10mm before travel to next object",
+                        true));
                     file.write(this->travel_to(Point(0, 0), erNone, "move to origin position for next object"));
                     m_enable_cooling_markers = true;
                     // Disable motion planner when traveling to first object point.

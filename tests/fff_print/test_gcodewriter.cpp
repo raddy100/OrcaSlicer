@@ -87,9 +87,25 @@ SCENARIO("set_speed emits values with fixed-point output.", "[GCodeWriter]") {
                 REQUIRE_THAT(writer.set_speed(203.200022), Catch::Matchers::Equals("G1 F203.2\n"));
             }
         }
+
         WHEN("set_speed is called to set speed to 203.200522") {
             THEN("Output string is G1 F203.201") {
                 REQUIRE_THAT(writer.set_speed(203.200522), Catch::Matchers::Equals("G1 F203.201\n"));
+            }
+        }
+    }
+}
+
+SCENARIO("travel_to_z_with_speed forces an explicit Z move with a custom feedrate", "[GCodeWriter]") {
+    GIVEN("A writer already positioned at the requested Z height") {
+        GCodeWriter writer;
+        writer.set_position(Vec3d(0.0, 0.0, 204.5));
+
+        WHEN("A forced custom-speed Z move targets the current Z height") {
+            const std::string gcode = writer.travel_to_z_with_speed(204.5, 10.0, std::string(), true);
+
+            THEN("The writer still emits a standalone G1 Z move with the requested feedrate") {
+                REQUIRE_THAT(gcode, Catch::Matchers::Equals("G1 Z204.5 F600\n"));
             }
         }
     }

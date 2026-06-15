@@ -2684,12 +2684,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             {
                 std::vector<double> ratios  = draw_csv_split(ds_tree.get<std::string>("<xmlattr>.initial_layer_flow_ratios", ""));
                 std::vector<double> heights = draw_csv_split(ds_tree.get<std::string>("<xmlattr>.initial_layer_heights", ""));
+                std::vector<double> base_heights = draw_csv_split(ds_tree.get<std::string>("<xmlattr>.base_layer_heights", ""));
                 if (ratios.empty()) {
                     const double legacy = ds_tree.get<double>("<xmlattr>.first_layer_flow_ratio", 0.90);
                     ratios = { legacy };
                 }
                 session.initial_layer_flow_ratios = std::move(ratios);
                 session.initial_layer_heights     = std::move(heights);
+                session.base_layer_heights        = std::move(base_heights);
             }
             session.wipe_enabled       = ds_tree.get<int>("<xmlattr>.wipe_enabled", 1) != 0;
             session.wipe_distance_mm   = ds_tree.get<double>("<xmlattr>.wipe_distance_mm", 1.0);
@@ -2730,6 +2732,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 }
                 session.layers.push_back(layer);
             }
+            session.sync_base_layer_heights();
             session.active_layer = session.layers.empty() ? -1 : (int)session.layers.size() - 1;
 
             m_draw_sessions.emplace(obj_idx, std::move(session));
@@ -7543,6 +7546,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             root.put("<xmlattr>.initial_layer_flow_ratios", draw_csv_join(session.initial_layer_flow_ratios));
             if (!session.initial_layer_heights.empty())
                 root.put("<xmlattr>.initial_layer_heights", draw_csv_join(session.initial_layer_heights));
+            if (!session.base_layer_heights.empty())
+                root.put("<xmlattr>.base_layer_heights", draw_csv_join(session.base_layer_heights));
             // Legacy attribute for downgrade compatibility: older builds still read this
             // single scalar and apply layer-0 elephant's-foot compensation.
             root.put("<xmlattr>.first_layer_flow_ratio",

@@ -21,6 +21,8 @@ void DrawSession::add_layer(double layer_height)
     if (layer_height <= 0.0)
         throw std::invalid_argument("DrawSession::add_layer: layer_height must be positive");
 
+    sync_base_layer_heights();
+
     DrawLayer layer;
     layer.layer_index = static_cast<int>(layers.size());
     if (layers.empty()) {
@@ -30,12 +32,14 @@ void DrawSession::add_layer(double layer_height)
     }
     layer.z_end = layer.z_start + layer_height;
     layers.push_back(std::move(layer));
+    base_layer_heights.push_back(layer_height);
     active_layer = static_cast<int>(layers.size()) - 1;
 }
 
 void DrawSession::clear()
 {
     layers.clear();
+    base_layer_heights.clear();
     active_layer = -1;
 }
 
@@ -45,6 +49,8 @@ void DrawSession::insert_layer(int position, double layer_height)
         throw std::invalid_argument("DrawSession::insert_layer: layer_height must be positive");
     if (position < 0 || position > (int)layers.size())
         throw std::out_of_range("DrawSession::insert_layer: position out of range");
+
+    sync_base_layer_heights();
 
     const double z_start = (position > 0) ? layers[position - 1].z_end : 0.0;
 
@@ -60,6 +66,7 @@ void DrawSession::insert_layer(int position, double layer_height)
     new_layer.z_start     = z_start;
     new_layer.z_end       = z_start + layer_height;
     layers.insert(layers.begin() + position, std::move(new_layer));
+    base_layer_heights.insert(base_layer_heights.begin() + position, layer_height);
     active_layer = position;
 }
 
@@ -68,9 +75,12 @@ bool DrawSession::remove_layer(int index)
     if (index < 0 || index >= (int)layers.size())
         return false;
 
+    sync_base_layer_heights();
+
     const double lh          = layers[index].layer_height();
     const int    prev_active = active_layer;
     layers.erase(layers.begin() + index);
+    base_layer_heights.erase(base_layer_heights.begin() + index);
 
     // Shift z and fix layer_index for all layers that were above the removed one.
     for (int i = index; i < (int)layers.size(); ++i) {
@@ -107,13 +117,29 @@ double DrawSession::flow_ratio_for_layer(int layer_index) const
                : 1.0;
 }
 
+void DrawSession::sync_base_layer_heights()
+{
+    if (base_layer_heights.size() > layers.size())
+        base_layer_heights.resize(layers.size());
+
+    for (size_t i = 0; i < base_layer_heights.size(); ++i) {
+        if (base_layer_heights[i] <= 0.0)
+            base_layer_heights[i] = layers[i].layer_height();
+    }
+
+    for (size_t i = base_layer_heights.size(); i < layers.size(); ++i)
+        base_layer_heights.push_back(layers[i].layer_height());
+}
+
 void DrawSession::reflow_layer_z()
 {
+    sync_base_layer_heights();
+
     double z = 0.0;
     for (size_t i = 0; i < layers.size(); ++i) {
-        double h = layers[i].layer_height();                 // natural height
+        double h = base_layer_heights[i];
         if (i < initial_layer_heights.size() && initial_layer_heights[i] > 0.0)
-            h = initial_layer_heights[i];                    // override
+            h = initial_layer_heights[i];
         layers[i].z_start = z;
         layers[i].z_end   = z + h;
         z = layers[i].z_end;

@@ -390,7 +390,7 @@ TEST_CASE("DrawPathGCodeGenerator: connected extrusion segments stay continuous 
     REQUIRE(checked_join);
 }
 
-TEST_CASE("DrawPathGCodeGenerator: Z values are strictly non-decreasing", "[DrawPathGCodeGenerator]")
+TEST_CASE("DrawPathGCodeGenerator: single-object Z values are strictly non-decreasing", "[DrawPathGCodeGenerator]")
 {
     DynamicPrintConfig cfg = make_test_config();
     DrawSession session = make_test_session();
@@ -415,9 +415,66 @@ TEST_CASE("DrawPathGCodeGenerator: Z values are strictly non-decreasing", "[Draw
     }
 
     REQUIRE(!zvals.empty());
-    for (std::size_t i = 1; i < zvals.size(); ++i) {
+    for (std::size_t i = 1; i < zvals.size(); ++i)
         REQUIRE(zvals[i] >= zvals[i - 1] - 1e-9);
+}
+
+TEST_CASE("DrawPathGCodeGenerator: batch object transitions use a separate slow transition lift", "[DrawPathGCodeGenerator]")
+{
+    DynamicPrintConfig cfg = make_test_config();
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+
+    DrawSession first;
+    first.initial_layer_flow_ratios = { 1.0 };
+    first.add_layer(0.2);
+    first.layers.back().segments.push_back({ Vec2d(0.0, 0.0), Vec2d(10.0, 0.0), false });
+
+    DrawSession second;
+    second.initial_layer_flow_ratios = { 1.0 };
+    second.add_layer(0.2);
+    second.layers.back().segments.push_back({ Vec2d(0.0, 0.0), Vec2d(10.0, 0.0), false });
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string      gcode = gen.generate_batch({
+        { &first,  Vec2d(0.0, 0.0) },
+        { &second, Vec2d(20.0, 0.0) }
+    });
+
+    bool found_transition_lift = false;
+    bool found_xy_reposition = false;
+    bool found_restore = false;
+
+    std::size_t pos = 0;
+    while ((pos = gcode.find("G1 ", pos)) != std::string::npos) {
+        std::size_t line_end = gcode.find('\n', pos);
+        if (line_end == std::string::npos)
+            line_end = gcode.size();
+        const std::string line = gcode.substr(pos, line_end - pos);
+
+        const auto xv = extract_axis_value(line, 'X');
+        const auto yv = extract_axis_value(line, 'Y');
+        const auto zv = extract_axis_value(line, 'Z');
+        const auto fv = extract_axis_value(line, 'F');
+
+        if (!found_transition_lift && !xv && !yv && zv && fv) {
+            if (std::abs(*zv - 10.2) < 0.001 && std::abs(*fv - 600.0) < 0.001)
+                found_transition_lift = true;
+        } else if (found_transition_lift && !found_xy_reposition && xv && yv && !zv) {
+            if (std::abs(*xv - 20.0) < 0.001 && std::abs(*yv - 0.0) < 0.001)
+                found_xy_reposition = true;
+        } else if (found_xy_reposition && !found_restore && !xv && !yv && zv) {
+            if (std::abs(*zv - 0.2) < 0.001)
+                found_restore = true;
+        }
+
+        pos = line_end + 1;
     }
+
+    REQUIRE(found_transition_lift);
+    REQUIRE(found_xy_reposition);
+    REQUIRE(found_restore);
+    REQUIRE(gcode.find("G1 X20 Y0 Z0.2") == std::string::npos);
+    REQUIRE(count_occurrences(gcode, "transition lift") == 1);
 }
 
 TEST_CASE("DrawPathGCodeGenerator: travel segment produces G0 without extruding E", "[DrawPathGCodeGenerator]")
@@ -1953,6 +2010,29 @@ TEST_CASE("InitialLayers: reflow_layer_z applies height overrides cumulatively",
     REQUIRE_THAT(s.layers[2].z_end, Catch::Matchers::WithinAbs(0.5, 1e-9));
 }
 
+TEST_CASE("InitialLayers: reflow_layer_z restores non-overridden layers to their base heights", "[InitialLayers]")
+{
+    DrawSession s = make_n_layer_line_session(3, 0.2);
+    s.initial_layer_heights = { 0.15, 0.15 };
+    s.reflow_layer_z();
+
+    REQUIRE_THAT(s.layers[0].layer_height(), Catch::Matchers::WithinAbs(0.15, 1e-9));
+    REQUIRE_THAT(s.layers[1].layer_height(), Catch::Matchers::WithinAbs(0.15, 1e-9));
+    REQUIRE_THAT(s.layers[2].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+
+    s.initial_layer_heights = { 0.15 };
+    s.reflow_layer_z();
+    REQUIRE_THAT(s.layers[0].layer_height(), Catch::Matchers::WithinAbs(0.15, 1e-9));
+    REQUIRE_THAT(s.layers[1].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+    REQUIRE_THAT(s.layers[2].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+
+    s.initial_layer_heights.clear();
+    s.reflow_layer_z();
+    REQUIRE_THAT(s.layers[0].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+    REQUIRE_THAT(s.layers[1].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+    REQUIRE_THAT(s.layers[2].layer_height(), Catch::Matchers::WithinAbs(0.20, 1e-9));
+}
+
 TEST_CASE("InitialLayers: generated G-code Z reflects per-layer height overrides", "[InitialLayers]")
 {
     DynamicPrintConfig cfg = make_test_config(0.4, 0.2, 1.75, 1.0);
@@ -1975,6 +2055,30 @@ TEST_CASE("InitialLayers: generated G-code Z reflects per-layer height overrides
     REQUIRE_THAT(z2, Catch::Matchers::WithinAbs(0.7, 1e-6));
     // The override raised the layer-0 height above its natural 0.2 mm.
     REQUIRE(z1 - z0 > 0.0);
+}
+
+TEST_CASE("InitialLayers: generator uses each layer's reflowed height for extrusion", "[InitialLayers]")
+{
+    DynamicPrintConfig cfg = make_test_config(0.4, 0.30, 1.75, 1.0);
+    cfg.set_key_value("retraction_length", new ConfigOptionFloats({ 0.0 }));
+    cfg.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
+
+    DrawSession session = make_n_layer_line_session(4, 0.2);
+    session.initial_layer_flow_ratios = { 0.90, 0.90 };
+    session.initial_layer_heights     = { 0.15, 0.15 };
+
+    DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
+    const std::string gcode = gen.generate(session);
+
+    const double filament_area = M_PI * (1.75 / 2.0) * (1.75 / 2.0);
+    const auto expected_e = [filament_area](double layer_height, double flow_mult) {
+        return (0.4 * layer_height) / filament_area * 10.0 * flow_mult;
+    };
+
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 0), Catch::Matchers::WithinRel(expected_e(0.15, 0.90), 1e-3));
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 1), Catch::Matchers::WithinRel(expected_e(0.15, 0.90), 1e-3));
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 2), Catch::Matchers::WithinRel(expected_e(0.20, 1.00), 1e-3));
+    REQUIRE_THAT(sum_layer_extrusion(gcode, 3), Catch::Matchers::WithinRel(expected_e(0.20, 1.00), 1e-3));
 }
 
 // Edge cases: N=0 (empty ratios) means every layer extrudes at full flow; an empty
@@ -2058,18 +2162,6 @@ static int wc_first_retract_line(const std::vector<std::string>& lines)
     return -1;
 }
 
-// Build a session with a single 0->10 line extrusion plus a trailing travel so a
-// mid-print retract (and thus wipe) is emitted.
-static DrawSession wc_make_line_then_travel_session()
-{
-    DrawSession session;
-    session.add_layer(0.2);
-    DrawLayer& l = session.layers.back();
-    l.segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
-    l.segments.push_back(DrawSegment::make_line(Vec2d(10, 0), Vec2d(20, 0), true)); // travel
-    return session;
-}
-
 TEST_CASE("DrawWipe: compute_wipe_geometry returns reversed direction and clamped endpoint", "[DrawWipe]")
 {
     DynamicPrintConfig cfg = make_test_config();
@@ -2129,27 +2221,38 @@ TEST_CASE("DrawWipe: compute_wipe_geometry returns reversed direction and clampe
     }
 }
 
-TEST_CASE("DrawWipe: wipe move precedes the first retract and conserves total retraction", "[DrawWipe]")
+TEST_CASE("DrawWipe: object transition retracts before wipe and conserves total retraction", "[DrawWipe]")
 {
     DynamicPrintConfig cfg = make_test_config();
-    // Relative E so each G1 E is a per-move delta; retract_before_wipe = 0 so the
-    // wipe travel move is emitted before any retraction.
+    // Relative E so each G1 E is a per-move delta. Even when retract_before_wipe
+    // is 0, object transitions should force retract before wipe.
     cfg.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
     cfg.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 0.0 }));
 
-    DrawSession session = wc_make_line_then_travel_session();
-    session.wipe_enabled     = true;
-    session.wipe_distance_mm = 1.5;
+    DrawSession first;
+    first.add_layer(0.2);
+    first.layers.back().segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
+    first.wipe_enabled     = true;
+    first.wipe_distance_mm = 1.5;
+
+    DrawSession second;
+    second.add_layer(0.2);
+    second.layers.back().segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(5, 0), false));
+    second.wipe_enabled     = true;
+    second.wipe_distance_mm = 1.5;
 
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
-    const std::string gcode = gen.generate(session);
+    const std::string gcode = gen.generate_batch({
+        { &first,  Vec2d(0.0, 0.0) },
+        { &second, Vec2d(20.0, 0.0) }
+    });
     const std::vector<std::string> lines = wc_split_lines(gcode);
 
     const int wipe_idx    = wc_first_line_with_comment(lines, "wipe");
     const int retract_idx = wc_first_retract_line(lines);
     REQUIRE(wipe_idx >= 0);
     REQUIRE(retract_idx >= 0);
-    REQUIRE(wipe_idx < retract_idx); // wipe move emitted before the negative-E retract
+    REQUIRE(retract_idx < wipe_idx); // object transition retract is emitted before wipe
 
     // The wipe move heads toward decreasing X (backward along 0->10).
     auto wipe_x = extract_axis_value(lines[wipe_idx], 'X');
@@ -2157,10 +2260,15 @@ TEST_CASE("DrawWipe: wipe move precedes the first retract and conserves total re
     REQUIRE(*wipe_x < 10.0);
 
     // Total retracted length is conserved vs. the wipe-disabled baseline.
-    DrawSession baseline = session;
-    baseline.wipe_enabled = false;
+    DrawSession baseline_first = first;
+    DrawSession baseline_second = second;
+    baseline_first.wipe_enabled = false;
+    baseline_second.wipe_enabled = false;
     DrawPathGCodeGenerator gen2(cfg, Vec2d::Zero());
-    const std::string base_gcode = gen2.generate(baseline);
+    const std::string base_gcode = gen2.generate_batch({
+        { &baseline_first,  Vec2d(0.0, 0.0) },
+        { &baseline_second, Vec2d(20.0, 0.0) }
+    });
 
     auto sum_negative_E = [](const std::string& g) {
         double s = 0.0;
@@ -2174,22 +2282,38 @@ TEST_CASE("DrawWipe: wipe move precedes the first retract and conserves total re
     REQUIRE_THAT(sum_negative_E(gcode), Catch::Matchers::WithinAbs(sum_negative_E(base_gcode), 1e-4));
 }
 
-TEST_CASE("DrawWipe: disabling wipe leaves output free of wipe moves", "[DrawWipe]")
+TEST_CASE("DrawWipe: disabling wipe leaves object-transition output free of wipe moves", "[DrawWipe]")
 {
     DynamicPrintConfig cfg = make_test_config();
-    DrawSession session = wc_make_line_then_travel_session();
-    session.wipe_enabled = false;
-    session.coast_distance_mm = 0.0;
+    DrawSession first;
+    first.add_layer(0.2);
+    first.layers.back().segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(10, 0), false));
+    first.wipe_enabled = false;
+    first.coast_distance_mm = 0.0;
+
+    DrawSession second;
+    second.add_layer(0.2);
+    second.layers.back().segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(5, 0), false));
+    second.wipe_enabled = false;
+    second.coast_distance_mm = 0.0;
 
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
-    const std::string disabled = gen.generate(session);
+    const std::string disabled = gen.generate_batch({
+        { &first,  Vec2d(0.0, 0.0) },
+        { &second, Vec2d(20.0, 0.0) }
+    });
     REQUIRE(count_occurrences(disabled, "wipe") == 0);
 
-    // Enabling wipe must change the output and introduce wipe moves.
-    DrawSession enabled = session;
-    enabled.wipe_enabled = true;
+    // Enabling wipe must change the output and introduce wipe moves only at the object boundary.
+    DrawSession enabled_first = first;
+    DrawSession enabled_second = second;
+    enabled_first.wipe_enabled = true;
+    enabled_second.wipe_enabled = true;
     DrawPathGCodeGenerator gen2(cfg, Vec2d::Zero());
-    const std::string with_wipe = gen2.generate(enabled);
+    const std::string with_wipe = gen2.generate_batch({
+        { &enabled_first,  Vec2d(0.0, 0.0) },
+        { &enabled_second, Vec2d(20.0, 0.0) }
+    });
     REQUIRE(count_occurrences(with_wipe, "wipe") > 0);
     REQUIRE(disabled != with_wipe);
 }
@@ -2224,20 +2348,26 @@ TEST_CASE("DrawWipe: postamble emits wipe then retract then lift", "[DrawWipe]")
     REQUIRE_THAT(*lift_z, Catch::Matchers::WithinAbs(10.2, 1e-6));
 }
 
-TEST_CASE("DrawWipe: wipe endpoint stays within the printable area", "[DrawWipe]")
+TEST_CASE("DrawWipe: object-transition wipe endpoint stays within the printable area", "[DrawWipe]")
 {
     DynamicPrintConfig cfg = make_test_config();
-    DrawSession session;
-    session.wipe_enabled     = true;
-    session.wipe_distance_mm = 2.0;
-    session.add_layer(0.2);
-    DrawLayer& l = session.layers.back();
-    // Extrusion ending close to the +X plate edge, then a travel to trigger a wipe.
-    l.segments.push_back(DrawSegment::make_line(Vec2d(240, 125), Vec2d(248, 125), false));
-    l.segments.push_back(DrawSegment::make_line(Vec2d(248, 125), Vec2d(200, 125), true));
+    DrawSession first;
+    first.wipe_enabled     = true;
+    first.wipe_distance_mm = 2.0;
+    first.add_layer(0.2);
+    first.layers.back().segments.push_back(DrawSegment::make_line(Vec2d(240, 125), Vec2d(248, 125), false));
+
+    DrawSession second;
+    second.wipe_enabled     = true;
+    second.wipe_distance_mm = 2.0;
+    second.add_layer(0.2);
+    second.layers.back().segments.push_back(DrawSegment::make_line(Vec2d(0, 0), Vec2d(5, 0), false));
 
     DrawPathGCodeGenerator gen(cfg, Vec2d::Zero());
-    const std::string gcode = gen.generate(session);
+    const std::string gcode = gen.generate_batch({
+        { &first,  Vec2d(0.0, 0.0) },
+        { &second, Vec2d(20.0, 0.0) }
+    });
 
     for (const std::string& ln : wc_split_lines(gcode)) {
         if (ln.find("wipe") == std::string::npos) continue;

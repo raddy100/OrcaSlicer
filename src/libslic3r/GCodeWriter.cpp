@@ -781,6 +781,20 @@ std::string GCodeWriter::travel_to_z(double z, const std::string &comment, bool 
     return this->_travel_to_z(z, comment);
 }
 
+std::string GCodeWriter::travel_to_z_with_speed(double z, double speed, const std::string &comment, bool force)
+{
+    if (!force && !this->will_move_z(z)) {
+        double nominal_z = m_pos(2) - m_lifted;
+        m_lifted -= (z - nominal_z);
+        if (std::abs(m_lifted) < EPSILON)
+            m_lifted = 0.;
+        return "";
+    }
+
+    m_lifted = 0;
+    return this->_travel_to_z_with_speed(z, speed, comment);
+}
+
 std::string GCodeWriter::_travel_to_z(double z, const std::string &comment)
 {
     m_pos(2) = z;
@@ -795,6 +809,18 @@ std::string GCodeWriter::_travel_to_z(double z, const std::string &comment)
     w.emit_z(z);
     w.emit_f(speed * 60.0);
     //BBS
+    w.emit_comment(GCodeWriter::full_gcode_comment, comment);
+    return w.string();
+}
+
+std::string GCodeWriter::_travel_to_z_with_speed(double z, double speed, const std::string &comment)
+{
+    assert(speed > 0.);
+    m_pos(2) = z;
+
+    GCodeG1Formatter w;
+    w.emit_z(z);
+    w.emit_f(speed * 60.0);
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
     return w.string();
 }
