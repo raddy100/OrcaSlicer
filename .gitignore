@@ -49,3 +49,4 @@ internal_docs/
 # Large local tools - never commit
 tools/strawberry-perl/
 tools/strawberry-perl.zip
+/nul
