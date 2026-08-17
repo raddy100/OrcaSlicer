@@ -1,3 +1,87 @@
+# OrcaSlicer — Draw Mode
+
+> **This is a fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer) containing a feature I designed and built: _Draw Mode_.**
+> It is not yet upstreamed. Everything below the divider is the original upstream README.
+> — [@raddy100](https://github.com/raddy100)
+
+Draw Mode bypasses the CAD → mesh → slice pipeline entirely and lets you author printer
+toolpaths **by hand**, on a 2D canvas, and emit real machine-ready G-code from them.
+
+Think of the existing G-code Preview, except instead of *viewing* paths the slicer produced,
+you *draw* the paths yourself. There is no model, no mesh, and no slicing step — you draw
+lines, arcs, and Bézier curves on a top-down view of the build plate, and those strokes
+become extrusion moves. It targets cases where you want explicit control over head motion:
+experimental single-wall structures, extrusion art, and calibration sequences.
+
+All print parameters — temperature, speed, nozzle diameter, retraction, fan, flavor, start/end
+G-code — are read from the active printer/filament/process presets, so Draw Mode never
+duplicates OrcaSlicer's settings UI. You author geometry; the profile supplies the physics.
+
+![Draw Mode canvas](CurrentGUI.png)
+
+## What it does
+
+- **Draw straight lines, circular arcs, and cubic Béziers** with multi-click input and
+  draggable control handles. Curves are sampled to a configurable chord tolerance, or emitted
+  as **native `G2`/`G3`** arcs when the firmware supports them.
+- **Full undo/redo** over every edit, via a command stack — 14 command types covering segment
+  add/delete/translate, endpoint and control-handle drags, connected-endpoint moves, layer
+  insert/remove/clear, copy/paste, splice, and a Z-mirror of the whole stack.
+- **Layer-stack editing** — insert above/below, copy a layer, paste additively, copy from
+  previous, mirror the stack, and remove layers with automatic Z-reflow of everything above.
+- **Print-quality correctness built into the generator**, not bolted on afterwards:
+  anti-blob wipe along the just-printed path before each retract, optional coasting,
+  per-layer elephant's-foot flow reduction, and a fan ramp matching upstream's `CoolingBuffer`.
+- **Round-trips through `.3mf`** — sessions persist inside the project file, and drawn paths
+  become placeable objects that copy/paste on the plate and print sequentially.
+
+## Where the code lives
+
+The feature is split so the model and the G-code generator carry no GUI dependency and stay
+unit-testable on their own.
+
+| Layer | Files | Responsibility |
+|---|---|---|
+| Core model | `src/libslic3r/DrawSession.{hpp,cpp}` | Pure-data session: layers, segments, Z-reflow. No wx, no GUI. |
+| G-code | `src/libslic3r/DrawPathGCodeGenerator.{hpp,cpp}` | Session → machine-ready G-code via the existing `GCodeWriter`. |
+| Geometry | `src/libslic3r/DrawPathMesh.{hpp,cpp}`, `DrawModeFeedback.{hpp,cpp}` | Synthetic mesh for the plate; curve sampling and length feedback. |
+| Commands | `src/slic3r/GUI/DrawModeCommands.{hpp,cpp}` | Undo/redo command objects. Header-only where it aids testability. |
+| UI | `src/slic3r/GUI/DrawModePanel`, `DrawModeInputHandler`, `DrawLayerSlider` | Panel, hit-testing and input routing, layer slider. |
+| Tests | `tests/libslic3r/test_draw_layer_slider.cpp`, `tests/fff_print/test_gcodewriter.cpp` | Catch2 coverage for slider mapping and writer behavior. |
+
+## Design notes
+
+A few decisions worth calling out, since they shaped the rest of the feature:
+
+- **The session stores geometry, never settings.** Temperature and speed are read fresh from
+  the active config at generation time, so changing a profile never invalidates a drawing.
+  Layer *heights* are the deliberate exception — they're snapshotted per layer, with
+  `base_layer_heights` kept separately so initial-layer overrides can be edited repeatedly
+  without permanently baking earlier values into untouched layers.
+- **`DrawSegment` stayed a backward-compatible aggregate.** Arcs and Béziers were added after
+  the initial line-only implementation; the struct gained `type`/`ctrl1`/`ctrl2` with defaults
+  so every previously serialized session still loads, and existing construction sites still
+  compile untouched.
+- **Wipe changes where retraction happens, not how much.** The nozzle retracts backward along
+  the path it just printed so end-of-path pressure bleeds out over the toolpath instead of
+  forming a blob at the seam. Net retraction length is identical to a plain retract.
+- **Batch generation shares one preamble.** Multi-instance plates emit a single homing
+  sequence rather than one per instance.
+
+## Building
+
+Build instructions are unchanged from upstream — see the original README below and the
+[upstream wiki](https://github.com/OrcaSlicer/OrcaSlicer/wiki).
+
+## Further reading
+
+- [`User_Architecture_Documents/PRD_Architecture_DrawMode.md`](User_Architecture_Documents/PRD_Architecture_DrawMode.md) —
+  the full requirements and architecture document the feature was built against.
+- [`docs/draw_mode_gui_redesign/`](docs/draw_mode_gui_redesign/) — implementation, testing, and
+  coordination notes for the GUI redesign pass.
+
+---
+
 <div align="center">
 
 <picture>
